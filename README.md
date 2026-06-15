@@ -32,7 +32,7 @@ For a random sample of $K$ origin‑destination pairs $(o,d)$:
 
 $$ k_{o,d} = \text{number of edge‑disjoint paths from } o \text{ to } d $$
 
-$$ R = \min\!\left(1,\; \frac{\mathrm{avg}(k)}{\mathrm{avg\_out\_degree}}\right) $$
+$$ R = \min\!\left(1,\; \frac{\mathrm{avg}(k)}{\mathrm{avg\ out\ degree}}\right) $$
 
 The average out‑degree of the network serves as an upper bound on the possible
 number of disjoint paths, normalising the result to $[0,1]$.
