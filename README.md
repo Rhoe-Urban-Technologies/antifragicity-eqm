@@ -192,7 +192,7 @@ pip install sumolib networkx matplotlib
 
 ### 3.2.2 Follow the instructions in
 `T4.1-KPIs/readme.md` to run the baseline and disaster simulations. This will generate output files in
-`T4.1-KPIs/LuSTScenario-master/scenario/outputs`.
+`T4.1-KPIs/LuSTScenario-master/scenario/baseline` for the baseline run and `T4.1-KPIs/LuSTScenario-master/scenario/outputs` for the "post-disaster" run.
 
 ### 3.2.3 Run `luxembourg_example.py` to compute KPIs and vulnerability
 
