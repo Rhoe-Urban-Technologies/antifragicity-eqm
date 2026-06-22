@@ -199,3 +199,136 @@ pip install sumolib networkx matplotlib
 ```bash
 python luxembourg_example.py
 ```
+
+## 4. Iterative Equilibrium Model
+
+Beyond the static vulnerability comparison, the **Three‑Layer Equilibrium Model**
+(D2.3, Algorithm 1) introduces a learning loop that allows the network to
+**adapt its capacities over multiple “days”** in order to improve the performance
+index after a disruption. This is implemented in `eq_model.py`.
+
+### 4.1 How the learning loop works
+
+The loop starts from the **post‑disaster** capacities (the same base network,
+with closures applied via the rerouter). Each iteration (one “day”) performs:
+
+1. **Apply current capacities** – writes a modified SUMO network where lane
+   speeds are scaled proportionally to the capacity ratio (a proxy for changing
+   throughput).
+2. **Run SUMO simulation** – same route files and rerouter closures as the
+   disaster run.
+3. **Compute core KPIs** – $M, R, C, S$ from the resulting `tripinfo.xml` and
+   `edgedata.xml`.
+4. **Update SRI components** – operational elasticity and infrastructure pressure.
+5. **Calculate per‑edge stress** and a **short‑term capacity gradient** $g_{\text{short}}$.
+6. **Update capacities** – multiply each edge’s capacity by $(1 + g_{\text{short}})$,
+   then clip to $[0.5 \times \text{base}, 2.0 \times \text{base}]$.
+7. **Check convergence** – stop when the performance index $E$ stabilises for
+   five consecutive days.
+
+The final configuration is the **antifragile equilibrium** for the given disruption.
+
+### 4.2 System Responsiveness Index (SRI)
+
+The magnitude of capacity adjustments is modulated by the SRI, which combines
+two components (the third, a learning index $L_{\text{index}}$, is currently
+omitted):
+
+**Operational elasticity**  
+
+$$
+\varepsilon_{\text{ops}} = \frac{R \cdot (1 - S)}{1 + e^{-10(R - 0.2)}}$$
+
+**Infrastructure pressure** – an exponential moving average of past stress:
+
+$$
+\rho_{\text{infra}}(t) = e^{-1/30} \cdot \rho_{\text{infra}}(t-1) + S(t)
+$$
+
+The SRI is computed with equal weights:
+
+$$
+\text{SRI} = 0.5 \cdot \varepsilon_{\text{ops}} + 0.5 \cdot \rho_{\text{infra}}
+$$
+
+### 4.3 Capacity update heuristic
+
+Because the true gradient $\nabla_c \bar{E}$ is not directly available, we use a
+**heuristic**:
+
+- For each edge $a$, compute its stress deviation $(\text{stress}_a - S_{\text{avg}})$.
+- Multiply by the learning rate $\eta_s = 0.1$ and the current SRI value:
+
+$$
+g_{\text{short},a} = \eta_s \cdot (\text{stress}_a - S_{\text{avg}}) \cdot \text{SRI}
+$$
+
+Edges with **above‑average stress** receive a positive capacity increase;
+edges with **below‑average stress** are slightly reduced. The capacities are
+then clipped to physically plausible bounds.
+
+Long‑term gradient and the antifragility gate are **not yet implemented**;
+they will be added in a future version.
+
+### 4.4 Running the iterative model
+
+The script `luxembourg_example_eq_model.py` calls `eq_model` after
+the static vulnerability assessment. Example:
+
+```python
+from eq_model import eq_model
+
+E_final, final_caps, history = eq_model(
+    DISASTER_NET, scenario_dir,
+    max_iterations=3, learning_rate=0.1, verbose=True
+)
+```
+
+Example output:
+
+```commandline
+Performance:
+ Duration: 1428.37s
+ Real time factor: 63.0088
+ UPS: 107697.373441
+Vehicles:
+ Inserted: 214073 (Loaded: 215526)
+ Running: 0
+ Waiting: 0
+ Teleports: 140 (Collisions: 10, Jam: 60, Yield: 39, Wrong Lane: 31)
+ Emergency Braking: 1235
+DijkstraRouter answered 398310 queries and explored 1975.96 edges on average.
+DijkstraRouter spent 335.98s answering queries (0.84ms on average).
+Final E = 0.8889
+
+Initial post-disaster E = 0.8489
+Final (after learning)   E = 0.8889
+Vulnerability after learning ΔE = -0.0537
+
+Process finished with exit code 0
+```
+
+### 4.5 Algorithm 1 compliance checklist
+
+The table below maps **Algorithm 1 (D2.3)** requirements to the current
+implementation in `eq_model.py`.
+
+| Algorithm 1 requirement | Status in `eq_model.py` | Notes                                                                                                                                                                                                                        |
+|---|---|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Initialize `c0, E0, k=0, max_iter` | Partial | Capacities and iteration state are initialized, but the implementation uses scenario-driven defaults (`max_days`) rather than strict paper constants (e.g., `max_iter=1000`), to keep runtime manageable for full SUMO runs. |
+| Tolerances `eps1..eps5` | Missing | A single `convergence_tol` was used as a simplification because explicit `f_k`, `m_k`, and cross-layer metrics are not yet exposed as vectors/scalars that can be norm-checked each iteration.                               |
+| Layer 1 `f_k = Wardrop(c_k, q)` | Partial | We use SUMO’s dynamic assignment with rerouters, which is a reasonable proxy but does not expose a clean f_k vector matching the theory. Extracting a stable equilibrium flow per iteration would require a dedicated convergence check inside SUMO.                |
+| Layer 2 `m_k = ModalSplit(f_k, U)` | Missing | The LuST scenario is car‑only for now; adding a modal split layer would require demand matrices for other modes and a calibrated utility function.                                                                           |
+| KPI evaluation `x_k = ComputeKPIs(f_k, m_k)` | Partial | KPIs (`M, R, C, S`) are computed directly from SUMO outputs, but the pipeline is not yet refactored around explicit `f_k`/`m_k` state objects required by the algorithmic notation.                                          |
+| Realized objective `E_k = E(x_k)` | Implemented | Computed via `performance_index_limited(...)`; this was prioritized because it is directly measurable from available SUMO-derived KPIs.                                                                                      |
+| Target objective `Ebar_k` | Missing | A separate target function was deferred to avoid introducing an unvalidated objective without first defining how targets are calibrated against observed KPIs and scenario goals.                                            |
+| Adaptive weight update `w_k = UpdateWeights(...)` | Missing | Fixed SRI weights were chosen for interpretability and reproducibility in early experiments; error-driven adaptive updates require a validated error signal and tuning strategy.                                             |
+| Full SRI `w1*eps_ops + w2*rho_infra + w3*L_index` | Partial | `eps_ops` and `rho_infra` are implemented; `L_index` is omitted because long-horizon learning memory/experience variables are not yet defined in the current data model.                                                     |
+| Short-term gradient `g_short` from `nabla_c Ebar_k` | Partial | A stress-deviation heuristic was used because analytic gradients are not available through SUMO black-box simulation; finite-difference gradients would require many extra runs per iteration.                               |
+| Long-term gradient `g_long` with lag and AF gate | Missing | These need a database of past interventions and statistical tests, which are infrastructure components not yet present.                                                                   |
+| Line search (`alpha` backtracking / Armijo) | Missing | Not added yet because each candidate `alpha` would trigger additional SUMO evaluations, substantially increasing runtime; this is planned after objective/gradient definitions are stabilized.                               |
+| Projected update `Pi_C{c .* [1 + alpha(eta_s g_short + eta_l g_long)]}` | Partial | Multiplicative update and projection bounds are implemented for physical plausibility, but full form is incomplete until `alpha` line search and `g_long` are available.                                                     |
+| Full stopping logic with all norms and consistency | Missing | Current stopping rule uses performance stabilization only; full criteria depend on explicit `f_k`, `m_k`, capacity norm tracking, and a defined cross-layer consistency metric.                                              |
+
+This means the current model is a **reduced, heuristic implementation** inspired
+by Algorithm 1, not a line-by-line complete translation.
