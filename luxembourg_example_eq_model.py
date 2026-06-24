@@ -1,5 +1,5 @@
 """Luxembourg vulnerability assessment + iterative equilibrium model."""
-
+import json
 import sys, os
 sys.path.append(os.path.dirname(__file__))
 
@@ -8,6 +8,7 @@ from kpi_functions import (
     performance_index_limited, system_vulnerability
 )
 from eq_model import eq_model
+from datetime import datetime
 
 LUST_BASE = "AntifragiCity-WP4/T4.1-KPIs/LuSTScenario-master"
 
@@ -17,6 +18,8 @@ BASELINE_EDGEDATA = os.path.join(LUST_BASE, "scenario", "baseline", "dua.static.
 DISASTER_NET = os.path.join(LUST_BASE, "scenario", "disaster", "disaster.lust.net.xml")
 DISASTER_TRIPINFO = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.tripinfo.xml")
 DISASTER_EDGEDATA = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.edgedata.xml")
+
+history_output_file = './eq_model_iter_logs/' + datetime.now().strftime("%Y%m%d-%H%M%S") + '/history.json'
 
 if __name__ == "__main__":
     # Static vulnerability
@@ -53,3 +56,6 @@ if __name__ == "__main__":
     print(f"\nInitial post-disaster E = {E_post:.4f}")
     print(f"Final (after learning)   E = {E_final:.4f}")
     print(f"Vulnerability after learning ΔE = {dE_learned:.4f}")
+
+    with (open(history_output_file, 'w')) as history_file:
+        json.dump(history, history_file)
