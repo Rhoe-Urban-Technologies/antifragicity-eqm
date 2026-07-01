@@ -28,7 +28,7 @@ if __name__ == "__main__":
     M_base = compute_throughput(BASELINE_TRIPINFO)
     R_base = compute_redundancy(BASELINE_NET)
     C_base = compute_entropy(BASELINE_TRIPINFO)
-    S_base = compute_stress(BASELINE_NET, BASELINE_EDGEDATA)
+    S_base = compute_stress(BASELINE_NET, BASELINE_EDGEDATA, sim_duration_hours=25.0)
 
     print(f"Baseline KPIs: M={M_base:.4f}, R={R_base:.4f}, C={C_base:.4f}, S={S_base:.4f}")
 
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     M_post = compute_throughput(DISASTER_TRIPINFO)
     R_post = compute_redundancy(DISASTER_NET)
     C_post = compute_entropy(DISASTER_TRIPINFO)
-    S_post = compute_stress(DISASTER_NET, DISASTER_EDGEDATA)
+    S_post = compute_stress(DISASTER_NET, DISASTER_EDGEDATA, sim_duration_hours=25.0)
 
     print(f"Post‑disaster KPIs: M={M_post:.4f}, R={R_post:.4f}, C={C_post:.4f}, S={S_post:.4f}")
 

@@ -121,11 +121,12 @@ def run_sumo_simulation(network_file, tripinfo_output_rel, edgedata_output_rel,
         raise RuntimeError(f"SUMO exited with code {process.returncode}")
 
 
-def get_edge_stresses(edgedata_file, network_file, current_capacities=None):
+def get_edge_stresses(edgedata_file, network_file,
+                      current_capacities=None,
+                      sim_duration_hours=25.0):
     """
     Return a dictionary {edge_id: stress_value} for every non‑internal edge.
-    The stress formula is the same as in compute_stress, applied per edge.
-    If current_capacities is provided, it is used; otherwise the base lane count × 1800.
+    Flow is converted to average hourly rate using `sim_duration_hours`.
     """
     net = sumolib.net.readNet(network_file)
     flows = load_edgedata(edgedata_file)
@@ -137,7 +138,9 @@ def get_edge_stresses(edgedata_file, network_file, current_capacities=None):
         if edge_id.startswith(":"):
             continue
 
-        flow = flows.get(edge_id, 0.0)
+        total_flow = flows.get(edge_id, 0.0)
+        flow_rate = total_flow / sim_duration_hours
+
         lanes = edge.getLanes()
         if not lanes:
             continue
@@ -154,7 +157,7 @@ def get_edge_stresses(edgedata_file, network_file, current_capacities=None):
         actual_speed = speeds.get(edge_id, free_flow_speed)
         actual_speed = max(actual_speed, 1e-3)
 
-        volume_ratio = flow / capacity if capacity > 0 else 0.0
+        volume_ratio = flow_rate / capacity if capacity > 0 else 0.0
         speed_drop = max(0.0, 1.0 - actual_speed / free_flow_speed)
         stress = min(1.0, volume_ratio * speed_drop)
         edge_stress_dict[edge_id] = stress
@@ -165,7 +168,7 @@ def get_edge_stresses(edgedata_file, network_file, current_capacities=None):
 def eq_model(disaster_network_file, scenario_directory,
              max_iterations=30, learning_rate=0.1, memory_decay=math.exp(-1 / 30),
              capacity_min_factor=0.5, capacity_max_factor=2.0,
-             convergence_tol=1e-4, verbose=True):
+             convergence_tol=1e-4, verbose=True, begin_time=0, end_time=90000):
     """
     Run the iterative equilibrium learning loop.
 
@@ -178,6 +181,8 @@ def eq_model(disaster_network_file, scenario_directory,
     history : list of tuples
         (day, E, M, R, C, S) for each iteration.
     """
+    sim_duration_hours = (end_time - begin_time) / 3600.0
+
     # Initial capacities from the base (undisrupted) network
     base_capacities = get_initial_capacities(disaster_network_file)
     current_capacities = base_capacities.copy()
@@ -207,7 +212,7 @@ def eq_model(disaster_network_file, scenario_directory,
         throughput = compute_throughput(tripinfo_absolute)
         redundancy = compute_redundancy(iterative_network_file)
         entropy = compute_entropy(tripinfo_absolute)
-        stress = compute_stress(iterative_network_file, edgedata_absolute)
+        stress = compute_stress(iterative_network_file, edgedata_absolute, sim_duration_hours)
 
         kpi_dict = {"M": throughput, "R": redundancy, "C": entropy, "S": stress}
         current_performance = performance_index_limited(kpi_dict)

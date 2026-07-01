@@ -218,7 +218,8 @@ def _load_edge_speeds(edgedata_file: str) -> dict:
 
 def compute_stress(net_file: str,
                    edgedata_file: str,
-                   capacity_per_lane: float = 1800.0) -> float:
+                   capacity_per_lane: float = 1800.0,
+                   sim_duration_hours: float = 25.0) -> float:
     """
     Average over all edges of:
         min( (flow / capacity) * (1 - actual_speed / free_flow_speed), 1.0 )
@@ -261,6 +262,7 @@ def compute_stress(net_file: str,
 
         # Flow (vehicles over the simulation period; assuming hourly rate)
         flow = flow_dict.get(eid, 0.0)
+        flow_rate = flow / sim_duration_hours
 
         # Capacity: number of lanes × capacity_per_lane
         lanes = edge.getLanes()
@@ -278,7 +280,7 @@ def compute_stress(net_file: str,
         # Avoid zero division / negative speed
         actual_speed = max(actual_speed, 1e-3)
 
-        volume_ratio = flow / capacity if capacity > 0 else 0.0
+        volume_ratio = flow_rate / capacity if capacity > 0 else 0.0
         speed_drop = max(0.0, 1.0 - actual_speed / free_speed)
         edge_stress = min(1.0, volume_ratio * speed_drop)
         edge_stresses.append(edge_stress)
