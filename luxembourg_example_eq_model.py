@@ -14,9 +14,11 @@ LUST_BASE = "AntifragiCity-WP4/T4.1-KPIs/LuSTScenario-master"
 
 BASELINE_NET = os.path.join(LUST_BASE, "scenario", "lust.net.xml")
 BASELINE_TRIPINFO = os.path.join(LUST_BASE, "scenario", "baseline", "dua.static.tripinfo.xml")
+BASELINE_SUMMARY = os.path.join(LUST_BASE, "scenario", "baseline", "dua.static.summary.xml")
 BASELINE_EDGEDATA = os.path.join(LUST_BASE, "scenario", "baseline", "dua.static.edgedata.xml")
 DISASTER_NET = os.path.join(LUST_BASE, "scenario", "disaster", "disaster.lust.net.xml")
 DISASTER_TRIPINFO = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.tripinfo.xml")
+DISASTER_SUMMARY = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.summary.xml")
 DISASTER_EDGEDATA = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.edgedata.xml")
 
 history_output_file = './eq_model_iter_logs/' + datetime.now().strftime("%Y%m%d-%H%M%S") + '/history.json'
@@ -24,7 +26,7 @@ history_output_file = './eq_model_iter_logs/' + datetime.now().strftime("%Y%m%d-
 if __name__ == "__main__":
     # Static vulnerability
     print("=== Static Vulnerability Assessment ===")
-    M_base = compute_throughput(BASELINE_TRIPINFO)
+    M_base = compute_throughput(BASELINE_TRIPINFO, BASELINE_SUMMARY)
     R_base = compute_redundancy(BASELINE_NET)
     C_base = compute_entropy(BASELINE_TRIPINFO)
     S_base = compute_stress(BASELINE_NET, BASELINE_EDGEDATA)
@@ -33,7 +35,7 @@ if __name__ == "__main__":
     if not (os.path.exists(DISASTER_TRIPINFO) and os.path.exists(DISASTER_EDGEDATA)):
         sys.exit("Disaster output files missing. Run the disaster simulation first.")
 
-    M_post = compute_throughput(DISASTER_TRIPINFO)
+    M_post = compute_throughput(DISASTER_TRIPINFO, DISASTER_SUMMARY)
     R_post = compute_redundancy(DISASTER_NET)
     C_post = compute_entropy(DISASTER_TRIPINFO)
     S_post = compute_stress(DISASTER_NET, DISASTER_EDGEDATA)

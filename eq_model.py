@@ -2,12 +2,9 @@
 
 import os
 import math
-import sys
 import subprocess
-import shutil
 import xml.etree.ElementTree as ET
 
-import numpy as np
 import sumolib
 
 from kpi_functions import (
@@ -57,14 +54,17 @@ def apply_capacities_to_network(base_network_file, output_network_file, target_c
         scale_factor = new_cap / original_cap if original_cap > 0 else 1.0
 
         for lane_element in edge_element.findall("lane"):
-            old_speed = float(lane_element.get("speed"))
+            old_speed_attr = lane_element.get("speed")
+            if old_speed_attr is None:
+                continue
+            old_speed = float(old_speed_attr)
             lane_element.set("speed", str(round(old_speed * scale_factor, 3)))
 
     tree.write(output_network_file, encoding="UTF-8", xml_declaration=True)
 
 
 def run_sumo_simulation(network_file, tripinfo_output_rel, edgedata_output_rel,
-                        scenario_dir, begin=0, end=90000):
+                        scenario_dir, begin=0, end=90000, summary_output_rel=None):
     """
     Launch a SUMO simulation using the given network and the standard route files.
     The output file paths are relative to the scenario directory.
@@ -72,12 +72,17 @@ def run_sumo_simulation(network_file, tripinfo_output_rel, edgedata_output_rel,
     cfg_file = os.path.join(scenario_dir, "dua.static.sumocfg")
     modified_cfg_file = os.path.join(scenario_dir, "mod.iter.sumocfg")
 
-    output_dir = os.path.dirname(os.path.join(scenario_dir, tripinfo_output_rel))
+    tripinfo_output_abs = os.path.join(scenario_dir, tripinfo_output_rel)
+    output_dir = os.path.dirname(tripinfo_output_abs)
     os.makedirs(output_dir, exist_ok=True)
 
     tree = ET.parse(cfg_file)
     root = tree.getroot()
-    for element_name, relative_path in [("tripinfo-output", tripinfo_output_rel),
+    if summary_output_rel is None:
+        summary_output_rel = tripinfo_output_rel.replace("tripinfo", "summary")
+
+    for element_name, relative_path in [("summary-output", summary_output_rel),
+                                        ("tripinfo-output", tripinfo_output_rel),
                                         ("edgedata-output", edgedata_output_rel)]:
         element = root.find(f".//{element_name}")
         if element is not None:
@@ -114,8 +119,9 @@ def run_sumo_simulation(network_file, tripinfo_output_rel, edgedata_output_rel,
     # Stream SUMO output line by line so progress is visible
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, bufsize=1)
-    for line in process.stdout:
-        print(line, end='')
+    if process.stdout is not None:
+        for line in process.stdout:
+            print(line, end='')
     process.wait()
     if process.returncode != 0:
         raise RuntimeError(f"SUMO exited with code {process.returncode}")
@@ -195,21 +201,24 @@ def eq_model(disaster_network_file, scenario_directory,
 
     tripinfo_relative = "outputs/iter.tripinfo.xml"
     edgedata_relative = "outputs/iter.edgedata.xml"
+    summary_relative = "outputs/iter.summary.xml"
     tripinfo_absolute = os.path.join(scenario_directory, tripinfo_relative)
     edgedata_absolute = os.path.join(scenario_directory, edgedata_relative)
+    summary_absolute = os.path.join(scenario_directory, summary_relative)
+    iterative_network_file: str = os.path.join(scenario_directory, "iter_lust.net.xml")
 
     os.makedirs(os.path.dirname(tripinfo_absolute), exist_ok=True)
 
     for day in range(1, max_iterations + 1):
         # Write the network with the current capacities
-        iterative_network_file = os.path.join(scenario_directory, "iter_lust.net.xml")
         apply_capacities_to_network(disaster_network_file, iterative_network_file,
                                     current_capacities)
 
         run_sumo_simulation(iterative_network_file, tripinfo_relative,
-                            edgedata_relative, scenario_directory)
+                            edgedata_relative, scenario_directory,
+                            summary_output_rel=summary_relative)
 
-        throughput = compute_throughput(tripinfo_absolute)
+        throughput = compute_throughput(tripinfo_absolute, summary_absolute)
         redundancy = compute_redundancy(iterative_network_file)
         entropy = compute_entropy(tripinfo_absolute)
         stress = compute_stress(iterative_network_file, edgedata_absolute, sim_duration_hours)
@@ -240,17 +249,19 @@ def eq_model(disaster_network_file, scenario_directory,
 
         short_term_gradient = {}
         for eid, edge_stress in edge_stresses.items():
-            deviation = edge_stress - average_stress
-            short_term_gradient[eid] = learning_rate * deviation * sri
+            edge_stress_value = float(edge_stress)
+            deviation = edge_stress_value - float(average_stress)
+            short_term_gradient[eid] = float(learning_rate) * deviation * float(sri)
 
         # ---------- Capacity update ----------
         new_capacities = {}
         for eid, cap in current_capacities.items():
-            adjustment = short_term_gradient.get(eid, 0.0)
-            updated_cap = cap * (1.0 + adjustment)
+            cap_value = float(cap)
+            adjustment = float(short_term_gradient.get(eid, 0.0))
+            updated_cap = cap_value * (1.0 + adjustment)
 
             # Clip to allowed range relative to the original base capacity
-            base_cap = base_capacities.get(eid, cap)
+            base_cap = float(base_capacities.get(eid, cap_value))
             lower_bound = base_cap * capacity_min_factor
             upper_bound = base_cap * capacity_max_factor
             new_capacities[eid] = max(lower_bound, min(upper_bound, updated_cap))
@@ -272,9 +283,10 @@ def eq_model(disaster_network_file, scenario_directory,
     apply_capacities_to_network(disaster_network_file, iterative_network_file,
                                 current_capacities)
     run_sumo_simulation(iterative_network_file, tripinfo_relative,
-                        edgedata_relative, scenario_directory)
+                        edgedata_relative, scenario_directory,
+                        summary_output_rel=summary_relative)
 
-    final_throughput = compute_throughput(tripinfo_absolute)
+    final_throughput = compute_throughput(tripinfo_absolute, summary_absolute)
     final_redundancy = compute_redundancy(iterative_network_file)
     final_entropy = compute_entropy(tripinfo_absolute)
     final_stress = compute_stress(iterative_network_file, edgedata_absolute)

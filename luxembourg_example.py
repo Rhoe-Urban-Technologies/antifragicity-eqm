@@ -16,16 +16,18 @@ LUST_BASE_DIR = "AntifragiCity-WP4/T4.1-KPIs/LuSTScenario-master"
 
 BASELINE_NET = LUST_BASE_DIR + "/scenario/lust.net.xml"
 BASELINE_TRIPINFO = LUST_BASE_DIR + "/scenario/baseline/dua.static.tripinfo.xml"
+BASELINE_SUMMARY = LUST_BASE_DIR + "/scenario/baseline/dua.static.summary.xml"
 BASELINE_EDGEDATA = LUST_BASE_DIR + "/scenario/baseline/dua.static.edgedata.xml"
 
 DISASTER_NET = LUST_BASE_DIR + "/scenario/lust.net.xml"
 DISASTER_TRIPINFO = LUST_BASE_DIR + "/scenario/outputs/disaster.tripinfo.xml"
+DISASTER_SUMMARY = LUST_BASE_DIR + "/scenario/outputs/disaster.summary.xml"
 DISASTER_EDGEDATA = LUST_BASE_DIR + "/scenario/outputs/disaster.edgedata.xml"
 
 
 if __name__ == "__main__":
     print("Computing baseline KPIs …")
-    M_base = compute_throughput(BASELINE_TRIPINFO)
+    M_base = compute_throughput(BASELINE_TRIPINFO, BASELINE_SUMMARY)
     R_base = compute_redundancy(BASELINE_NET)
     C_base = compute_entropy(BASELINE_TRIPINFO)
     S_base = compute_stress(BASELINE_NET, BASELINE_EDGEDATA, sim_duration_hours=25.0)
@@ -38,7 +40,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print("\nComputing post‑disaster KPIs …")
-    M_post = compute_throughput(DISASTER_TRIPINFO)
+    M_post = compute_throughput(DISASTER_TRIPINFO, DISASTER_SUMMARY)
     R_post = compute_redundancy(DISASTER_NET)
     C_post = compute_entropy(DISASTER_TRIPINFO)
     S_post = compute_stress(DISASTER_NET, DISASTER_EDGEDATA, sim_duration_hours=25.0)

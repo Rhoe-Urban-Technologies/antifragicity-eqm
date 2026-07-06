@@ -9,9 +9,11 @@ returns normalised values in [0,1] for:
     S - Stress index (average volume/capacity × speed drop)
 """
 import math
+import os
 import random
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from typing import Optional
 
 import networkx as nx
 import sumolib
@@ -21,17 +23,69 @@ import sumolib
 # 1. Mobility Throughput (M)
 # ---------------------------------------------------------------------------
 
-def compute_throughput(tripinfo_file: str) -> float:
+def _infer_summary_file(tripinfo_file: str) -> str | None:
+    """Infer the sibling summary file for a given tripinfo path."""
+    directory, filename = os.path.split(tripinfo_file)
+    if "tripinfo" not in filename:
+        return None
+    summary_file = os.path.join(directory, filename.replace("tripinfo", "summary"))
+    return summary_file if os.path.exists(summary_file) else None
+
+
+def load_summary_counts(summary_file: str) -> dict:
     """
-    Fraction of trips that successfully arrived.
+    Parse the final <step> record from a SUMO summary XML file.
+
+    Returns integer-valued counters such as loaded, inserted, arrived,
+    teleports, discarded, and running when present.
+    """
+    tree = ET.parse(summary_file)
+    last_step = None
+    for step in tree.getroot().findall("step"):
+        last_step = step
+
+    if last_step is None:
+        return {}
+
+    counts = {}
+    for key, value in last_step.attrib.items():
+        try:
+            counts[key] = int(float(value))
+        except (TypeError, ValueError):
+            counts[key] = value
+    return counts
+
+
+def compute_throughput(tripinfo_file: str, summary_file: Optional[str] = None) -> float:
+    """
+    Fraction of loaded demand that successfully arrived within the simulation
+    horizon.
 
     Formula
     -------
-    M = N_arrived / N_total
+    Preferred definition (when SUMO summary output is available):
+
+        M = N_arrived / N_loaded
 
     where
         N_arrived = number of <tripinfo> elements with an 'arrival' attribute,
-        N_total   = total number of <tripinfo> elements.
+        N_loaded  = final 'loaded' counter from summary-output.
+
+    This fixes a known bias in tripinfo-only accounting: vehicles discarded
+    before insertion due to `max-depart-delay` never appear in tripinfo, but
+    they are included in the summary 'loaded' demand and should reduce M.
+
+    If no summary file is provided (or inferable), the function falls back to
+    the legacy approximation:
+
+        M = N_arrived / N_tripinfo
+
+    Notes
+    -----
+    If SUMO teleports stuck vehicles to a downstream edge and lets them finish,
+    they may still count as arrived. For a strict throughput interpretation,
+    configure the simulation with `time-to-teleport.remove="true"` and
+    `collision.action="remove"`.
 
     Returns
     -------
@@ -46,6 +100,13 @@ def compute_throughput(tripinfo_file: str) -> float:
         total += 1
         if trip.get("arrival") is not None:  # trip completed
             arrived += 1
+
+    resolved_summary = summary_file or _infer_summary_file(tripinfo_file)
+    if resolved_summary and os.path.exists(resolved_summary):
+        counts = load_summary_counts(resolved_summary)
+        loaded = counts.get("loaded", 0)
+        return arrived / loaded if loaded > 0 else 0.0
+
     return arrived / total if total > 0 else 0.0
 
 
@@ -76,7 +137,7 @@ def _sample_od_pairs(G, num_pairs=500):
 
 
 def compute_redundancy(net_file: str,
-                       od_pairs: list = None,
+                       od_pairs: Optional[list] = None,
                        sample_size: int = 500) -> float:
     """
     Average number of edge‑disjoint paths per OD pair, normalised by the
