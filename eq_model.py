@@ -72,7 +72,7 @@ def run_sumo_simulation(network_file, tripinfo_output_rel, edgedata_output_rel,
     cfg_file = os.path.join(scenario_dir, "dua.static.sumocfg")
     modified_cfg_file = os.path.join(scenario_dir, "mod.iter.sumocfg")
 
-    tripinfo_output_abs = os.path.join(scenario_dir, tripinfo_output_rel)
+    tripinfo_output_abs = str(os.path.join(scenario_dir, tripinfo_output_rel))
     output_dir = os.path.dirname(tripinfo_output_abs)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -206,6 +206,13 @@ def eq_model(disaster_network_file, scenario_directory,
     edgedata_absolute = os.path.join(scenario_directory, edgedata_relative)
     summary_absolute = os.path.join(scenario_directory, summary_relative)
     iterative_network_file: str = os.path.join(scenario_directory, "iter_lust.net.xml")
+    route_files_for_entropy = [
+        os.path.join(scenario_directory, "buslines.rou.xml"),
+        os.path.join(scenario_directory, "DUARoutes", "local.0.rou.xml"),
+        os.path.join(scenario_directory, "DUARoutes", "local.1.rou.xml"),
+        os.path.join(scenario_directory, "DUARoutes", "local.2.rou.xml"),
+        os.path.join(scenario_directory, "transit.rou.xml"),
+    ]
 
     os.makedirs(os.path.dirname(tripinfo_absolute), exist_ok=True)
 
@@ -220,7 +227,7 @@ def eq_model(disaster_network_file, scenario_directory,
 
         throughput = compute_throughput(tripinfo_absolute, summary_absolute)
         redundancy = compute_redundancy(iterative_network_file)
-        entropy = compute_entropy(tripinfo_absolute)
+        entropy = compute_entropy(tripinfo_absolute, route_files_for_entropy)
         stress = compute_stress(iterative_network_file, edgedata_absolute, sim_duration_hours)
 
         kpi_dict = {"M": throughput, "R": redundancy, "C": entropy, "S": stress}
@@ -288,7 +295,7 @@ def eq_model(disaster_network_file, scenario_directory,
 
     final_throughput = compute_throughput(tripinfo_absolute, summary_absolute)
     final_redundancy = compute_redundancy(iterative_network_file)
-    final_entropy = compute_entropy(tripinfo_absolute)
+    final_entropy = compute_entropy(tripinfo_absolute, route_files_for_entropy)
     final_stress = compute_stress(iterative_network_file, edgedata_absolute)
 
     final_kpis = {"M": final_throughput, "R": final_redundancy,

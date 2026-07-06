@@ -77,10 +77,16 @@ $$ C = \frac{H}{H_{\max}} $$
 $C = 0$ indicates all flow is concentrated on a single OD pair; $C = 1$
 indicates a perfectly uniform distribution.
 
-**SUMO data source** – `tripinfo.xml`  
-The function `compute_entropy(tripinfo_file)` extracts the origin and destination
-of every trip (from `departLane` / `arrivalLane` attributes), builds an OD
-flow dictionary, then applies the Shannon entropy formula.
+**SUMO data sources** – `tripinfo.xml` and optionally route files (`*.rou.xml`)  
+The function `compute_entropy(tripinfo_file, route_files=None)` supports two
+modes:
+
+- default (tripinfo-only): builds OD flows from executed trips,
+- demand mode (recommended for comparisons): builds OD flows from route files
+  so demand discarded before departure is still included.
+
+Using route-file demand avoids overestimating entropy when many trips are
+discarded due to departure constraints and never appear in tripinfo.
 
 ### 1.4 Stress Index ($S$)
 

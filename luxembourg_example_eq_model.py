@@ -21,6 +21,14 @@ DISASTER_TRIPINFO = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.tri
 DISASTER_SUMMARY = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.summary.xml")
 DISASTER_EDGEDATA = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.edgedata.xml")
 
+ROUTE_FILES = [
+    os.path.join(LUST_BASE, "scenario", "buslines.rou.xml"),
+    os.path.join(LUST_BASE, "scenario", "DUARoutes", "local.0.rou.xml"),
+    os.path.join(LUST_BASE, "scenario", "DUARoutes", "local.1.rou.xml"),
+    os.path.join(LUST_BASE, "scenario", "DUARoutes", "local.2.rou.xml"),
+    os.path.join(LUST_BASE, "scenario", "transit.rou.xml"),
+]
+
 history_output_file = './eq_model_iter_logs/' + datetime.now().strftime("%Y%m%d-%H%M%S") + '/history.json'
 
 if __name__ == "__main__":
@@ -28,7 +36,7 @@ if __name__ == "__main__":
     print("=== Static Vulnerability Assessment ===")
     M_base = compute_throughput(BASELINE_TRIPINFO, BASELINE_SUMMARY)
     R_base = compute_redundancy(BASELINE_NET)
-    C_base = compute_entropy(BASELINE_TRIPINFO)
+    C_base = compute_entropy(BASELINE_TRIPINFO, ROUTE_FILES)
     S_base = compute_stress(BASELINE_NET, BASELINE_EDGEDATA)
     print(f"Baseline: M={M_base:.4f} R={R_base:.4f} C={C_base:.4f} S={S_base:.4f}")
 
@@ -37,7 +45,7 @@ if __name__ == "__main__":
 
     M_post = compute_throughput(DISASTER_TRIPINFO, DISASTER_SUMMARY)
     R_post = compute_redundancy(DISASTER_NET)
-    C_post = compute_entropy(DISASTER_TRIPINFO)
+    C_post = compute_entropy(DISASTER_TRIPINFO, ROUTE_FILES)
     S_post = compute_stress(DISASTER_NET, DISASTER_EDGEDATA)
     print(f"Post-disaster: M={M_post:.4f} R={R_post:.4f} C={C_post:.4f} S={S_post:.4f}")
 

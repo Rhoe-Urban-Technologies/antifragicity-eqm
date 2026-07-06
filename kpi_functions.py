@@ -212,7 +212,116 @@ def _load_od_flows(tripinfo_file: str) -> dict:
     return dict(flows)
 
 
-def compute_entropy(tripinfo_file: str) -> float:
+def _route_edges_from_vehicle(vehicle: ET.Element, route_edge_map: dict) -> tuple[Optional[str], Optional[str]]:
+    """Extract origin/destination edges for a <vehicle> element."""
+    origin = vehicle.get("from")
+    destination = vehicle.get("to")
+    if origin and destination:
+        return origin, destination
+
+    route_id = vehicle.get("route")
+    if route_id and route_id in route_edge_map:
+        return route_edge_map[route_id]
+
+    for child in vehicle:
+        if child.tag != "route":
+            continue
+        child_edges = child.get("edges")
+        if child_edges:
+            edges = child_edges.split()
+            if edges:
+                return edges[0], edges[-1]
+        child_route_id = child.get("refId")
+        if child_route_id and child_route_id in route_edge_map:
+            return route_edge_map[child_route_id]
+
+    return None, None
+
+
+def _load_od_flows_from_route_files(route_files: list[str]) -> dict:
+    """
+    Build OD demand dictionary from SUMO route files.
+
+    This captures all planned demand (loaded by SUMO), including vehicles that
+    may later be discarded before departure and never appear in tripinfo.
+    """
+    flows = defaultdict(int)
+    route_edge_map = {}
+    pending_route_refs = defaultdict(int)
+
+    for route_file in route_files:
+        if not os.path.exists(route_file):
+            continue
+
+        for _, element in ET.iterparse(route_file, events=("end",)):
+            tag = element.tag
+
+            if tag == "route":
+                route_id = element.get("id")
+                edges_attr = element.get("edges")
+                if route_id and edges_attr:
+                    edges = edges_attr.split()
+                    if edges:
+                        route_edge_map[route_id] = (edges[0], edges[-1])
+                        pending = pending_route_refs.pop(route_id, 0)
+                        if pending > 0:
+                            flows[(edges[0], edges[-1])] += pending
+                    element.clear()
+                continue
+
+            amount = 1
+            amount_attr = element.get("number") if tag == "flow" else None
+            if amount_attr:
+                try:
+                    amount = int(float(amount_attr))
+                except ValueError:
+                    amount = 1
+
+            origin = None
+            destination = None
+
+            if tag == "trip":
+                origin = element.get("from")
+                destination = element.get("to")
+
+            elif tag in ("vehicle", "flow"):
+                origin = element.get("from")
+                destination = element.get("to")
+
+                if not (origin and destination):
+                    route_ref = element.get("route")
+                    if route_ref and route_ref in route_edge_map:
+                        origin, destination = route_edge_map[route_ref]
+                    elif route_ref:
+                        pending_route_refs[route_ref] += amount
+
+                if not (origin and destination):
+                    for child in element:
+                        if child.tag != "route":
+                            continue
+                        child_edges = child.get("edges")
+                        if child_edges:
+                            edges = child_edges.split()
+                            if edges:
+                                origin, destination = edges[0], edges[-1]
+                                break
+                        child_ref = child.get("refId")
+                        if child_ref and child_ref in route_edge_map:
+                            origin, destination = route_edge_map[child_ref]
+                            break
+                        if child_ref:
+                            pending_route_refs[child_ref] += amount
+                            break
+
+            if origin and destination:
+                flows[(origin, destination)] += amount
+
+            element.clear()
+
+    return dict(flows)
+
+
+def compute_entropy(tripinfo_file: str, route_files: Optional[list[str]] = None) -> float:
     """
     Normalised Shannon entropy of the OD flow distribution.
 
@@ -225,12 +334,24 @@ def compute_entropy(tripinfo_file: str) -> float:
 
     C = H / H_max
 
+    Input modes
+    -----------
+    route_files is None:
+        OD flows are computed from tripinfo (executed trips only).
+    route_files provided:
+        OD flows are computed from planned demand in route files, which keeps
+        trips discarded before departure in the entropy accounting.
+
     Returns
     -------
     float
         C in [0,1].  0 = completely concentrated flows, 1 = perfectly uniform.
     """
-    od_flows = _load_od_flows(tripinfo_file)
+    od_flows = (
+        _load_od_flows_from_route_files(route_files)
+        if route_files
+        else _load_od_flows(tripinfo_file)
+    )
     total = sum(od_flows.values())
     if total == 0 or len(od_flows) <= 1:
         return 0.0

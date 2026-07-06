@@ -24,12 +24,20 @@ DISASTER_TRIPINFO = LUST_BASE_DIR + "/scenario/outputs/disaster.tripinfo.xml"
 DISASTER_SUMMARY = LUST_BASE_DIR + "/scenario/outputs/disaster.summary.xml"
 DISASTER_EDGEDATA = LUST_BASE_DIR + "/scenario/outputs/disaster.edgedata.xml"
 
+ROUTE_FILES = [
+    LUST_BASE_DIR + "/scenario/buslines.rou.xml",
+    LUST_BASE_DIR + "/scenario/DUARoutes/local.0.rou.xml",
+    LUST_BASE_DIR + "/scenario/DUARoutes/local.1.rou.xml",
+    LUST_BASE_DIR + "/scenario/DUARoutes/local.2.rou.xml",
+    LUST_BASE_DIR + "/scenario/transit.rou.xml",
+]
+
 
 if __name__ == "__main__":
     print("Computing baseline KPIs …")
     M_base = compute_throughput(BASELINE_TRIPINFO, BASELINE_SUMMARY)
     R_base = compute_redundancy(BASELINE_NET)
-    C_base = compute_entropy(BASELINE_TRIPINFO)
+    C_base = compute_entropy(BASELINE_TRIPINFO, ROUTE_FILES)
     S_base = compute_stress(BASELINE_NET, BASELINE_EDGEDATA, sim_duration_hours=25.0)
 
     print(f"Baseline KPIs: M={M_base:.4f}, R={R_base:.4f}, C={C_base:.4f}, S={S_base:.4f}")
@@ -42,7 +50,7 @@ if __name__ == "__main__":
     print("\nComputing post‑disaster KPIs …")
     M_post = compute_throughput(DISASTER_TRIPINFO, DISASTER_SUMMARY)
     R_post = compute_redundancy(DISASTER_NET)
-    C_post = compute_entropy(DISASTER_TRIPINFO)
+    C_post = compute_entropy(DISASTER_TRIPINFO, ROUTE_FILES)
     S_post = compute_stress(DISASTER_NET, DISASTER_EDGEDATA, sim_duration_hours=25.0)
 
     print(f"Post‑disaster KPIs: M={M_post:.4f}, R={R_post:.4f}, C={C_post:.4f}, S={S_post:.4f}")
