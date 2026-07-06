@@ -12,16 +12,31 @@ directly from SUMO simulation results. All indicators are normalised to $[0,1]$.
 
 **Formula**  
 
-$$ M = \frac{N_{\text{arrived}}}{N_{\text{total}}} $$
+$$ M = \frac{N_{\text{arrived}}}{N_{\text{loaded}}} $$
 
 where  
 
 - $N_{\text{arrived}}$ = number of trips with a valid `arrival` time,  
-- $N_{\text{total}}$   = total number of `<tripinfo>` elements in the simulation output.
+- $N_{\text{loaded}}$  = final `loaded` count in SUMO `summary.xml`.
 
-**SUMO data source** – `tripinfo.xml`  
-The function `compute_throughput(tripinfo_file)` parses the XML, counts trips,
-and returns the fraction that successfully completed.
+**SUMO data sources** – `tripinfo.xml` and `summary.xml`  
+The function `compute_throughput(tripinfo_file, summary_file)` counts arrived
+trips from `tripinfo.xml` and divides by the full loaded demand from
+`summary.xml`. This avoids overestimating throughput when vehicles are discarded
+before departure because of `max-depart-delay`.
+
+**Important SUMO setting**  
+If SUMO teleports stalled vehicles forward along their routes, they can still
+receive an `arrival` attribute and artificially inflate $M$. The scenario
+configs in this repository therefore use:
+
+- `time-to-teleport="600"` together with `time-to-teleport.remove="true"`
+- `collision.action="remove"`
+- `tripinfo-output.write-unfinished="true"`
+
+This means jammed or colliding vehicles are removed instead of being counted as
+successful arrivals, and vehicles still in the network at the horizon are kept
+visible in the tripinfo output.
 
 ---
 ### 1.2 Redundancy ($R$)
