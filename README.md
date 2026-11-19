@@ -136,7 +136,7 @@ window, by default the closure hour 17:00–18:00 (`STRESS_WINDOW` in
 runs. `compute_stress(net_file, edgedata_file, window=(61200, 64800))` needs
 edgedata aggregated hourly. The scenario configs write it via
 `edgedata.hourly.baseline.add.xml` / `edgedata.hourly.disaster.add.xml`
-(local submodule changes, see §3.3.2), and
+(in the submodule fork, see §3.3.2), and
 the learning loop writes its own. Without `window`, the period length is taken
 from the edgedata intervals, so it always matches the simulated horizon.
 
@@ -345,61 +345,43 @@ pip install -r requirements.txt        # sumolib, networkx, tqdm (+ matplotlib f
 pip install -r requirements-dev.txt    # adds pytest
 ```
 
-#### 3.3.2 Prepare the scenario configs (local changes to the submodule)
+#### 3.3.2 Get the scenario submodule
 
-The `AntifragiCity-WP4` submodule is maintained in a separate repository that
-this project cannot push to, so the scenario changes this project relies on are
-**not** in the submodule commit it points to. After cloning (and after every
-`git submodule update`, which resets these files), apply them by hand in
-`AntifragiCity-WP4/T4.1-KPIs/LuSTScenario-master/scenario/`:
+`AntifragiCity-WP4` is a submodule pointing to the fork
+[`Rhoe-Urban-Technologies/AntifragiCity-WP4`](https://github.com/Rhoe-Urban-Technologies/AntifragiCity-WP4),
+branch `antifragicity-eqm`. The fork carries this project's scenario changes on
+top of the upstream repository (`sunlinghang/AntifragiCity-WP4`):
 
-1. **Create `edgedata.hourly.baseline.add.xml`** (hourly edgedata for the
-   baseline; the `file` path is relative to this add file):
+- `disaster.sumocfg` runs for 25 h (`<end value="90000"/>`), like the baseline;
+- `edgedata.hourly.baseline.add.xml` / `edgedata.hourly.disaster.add.xml`
+  write hourly edgedata, and are listed in `additional-files` of
+  `dua.static.sumocfg` / `disaster.sumocfg`;
+- the earlier commit disabling teleports, removing vehicles after collisions and
+  writing unfinished trips.
 
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <additional>
-       <edgeData id="hourly" file="baseline/dua.static.hourly.edgedata.xml" period="3600"/>
-   </additional>
-   ```
+```bash
+git clone --recurse-submodules git@github.com:Rhoe-Urban-Technologies/AntifragiCity.git
+# or, in an existing clone:
+git submodule sync && git submodule update --init
+```
 
-2. **Create `edgedata.hourly.disaster.add.xml`**:
+To pick up new upstream work (in `AntifragiCity-WP4/`):
 
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <additional>
-       <edgeData id="hourly" file="outputs/disaster.hourly.edgedata.xml" period="3600"/>
-   </additional>
-   ```
+```bash
+git remote add upstream https://github.com/sunlinghang/AntifragiCity-WP4.git   # once
+git fetch upstream
+git switch antifragicity-eqm
+git merge upstream/main
+git push origin antifragicity-eqm
+```
 
-3. **`dua.static.sumocfg`**: append `edgedata.hourly.baseline.add.xml` to
-   `additional-files`:
+Then commit the new submodule pointer in this repository
+(`git add AntifragiCity-WP4`).
 
-   ```xml
-   <additional-files value="vtypes.add.xml,busstops.add.xml,e1detectors.add.xml,lust.poly.xml,tll.static.xml,edgedata.hourly.baseline.add.xml"/>
-   ```
+The learning loop (`eq_model.py`) does not depend on these config changes: it
+writes its own hourly edgedata additional and passes `--end` on the command line.
 
-4. **`disaster.sumocfg`**: append `edgedata.hourly.disaster.add.xml` to
-   `additional-files` and run for 25 h, like the baseline:
-
-   ```xml
-   <additional-files value="vtypes.add.xml,busstops.add.xml,e1detectors.add.xml,lust.poly.xml,tll.static.xml,disaster_closures.add.xml,edgedata.hourly.disaster.add.xml"/>
-   ...
-   <end value="90000"/>
-   ```
-
-   (`get_benchmark.py` already passes `--end 90000` for the baseline.)
-
-Check: `git -C AntifragiCity-WP4 status` should list the two configs as
-modified and the two add files as untracked. Without steps 1–4 the
-simulations produce no `*.hourly.edgedata.xml`, and `luxembourg_example.py`
-stops and names the missing file.
-
-The learning loop (`eq_model.py`) does **not** need these changes: it writes
-its own hourly edgedata additional, removes the static one from its run
-config, and passes `--end` on the command line.
-
-Not done here, but see "Suggested future changes" in `CHANGELOG.md`:
+Not done yet (see "Suggested future changes" in `CHANGELOG.md`):
 `device.rerouting.probability` is 0.70 in `dua.static.sumocfg` and 1.00 in
 `disaster.sumocfg`; set both to the same value before comparing runs.
 

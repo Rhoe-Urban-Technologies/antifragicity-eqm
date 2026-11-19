@@ -1,3 +1,4 @@
 [submodule "AntifragiCity-WP4"]
 	path = AntifragiCity-WP4
-	url = https://github.com/sunlinghang/AntifragiCity-WP4.git
+	url = git@github.com:Rhoe-Urban-Technologies/AntifragiCity-WP4.git
+	branch = antifragicity-eqm

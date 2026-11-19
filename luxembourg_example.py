@@ -49,8 +49,8 @@ def static_assessment(stress_window=cfg.STRESS_WINDOW, entropy_window=cfg.ENTROP
     if needs_hourly:
         baseline_files.append(cfg.BASELINE_HOURLY_EDGEDATA)
         disaster_files.append(cfg.DISASTER_HOURLY_EDGEDATA)
-    setup_hint = ("\nHourly edgedata also needs the local scenario config changes "
-                  "in README §3.3.2." if needs_hourly else "")
+    setup_hint = ("\nHourly edgedata needs the scenario configs from the submodule "
+                  "fork (README §3.3.2)." if needs_hourly else "")
     _require(baseline_files, "Run the baseline: `python get_benchmark.py` in "
                              "AntifragiCity-WP4/T4.1-KPIs." + setup_hint)
     _require(disaster_files, "Run the disaster scenario: `sumo -c LuSTScenario-master/scenario/"
