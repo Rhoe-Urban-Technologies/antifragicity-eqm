@@ -1,46 +1,59 @@
 """Iterative equilibrium model – the learning loop over multiple SUMO runs."""
 
-import os
 import math
-import subprocess
+import os
 import xml.etree.ElementTree as ET
 
-import sumolib
-
 from kpi_functions import (
-    compute_throughput,
+    DEFAULT_CAPACITY_PER_LANE,
+    _read_net,
+    compute_edge_stresses,
+    compute_link_entropy,
     compute_redundancy,
-    compute_entropy,
-    compute_stress,
+    compute_throughput,
     performance_index_limited,
-    load_edgedata,
-    _load_edge_speeds,
+)
+from sumo_runner import run_sumo, write_hourly_edgedata_additional, write_run_config
+
+# Additional files in the static configs that write hourly edgedata for the
+# static baseline/disaster runs. They are removed from the learning-loop
+# config so iterations don't overwrite those outputs; the loop writes its own
+# hourly edgedata instead.
+STATIC_HOURLY_ADDITIONALS = (
+    "edgedata.hourly.baseline.add.xml",
+    "edgedata.hourly.disaster.add.xml",
 )
 
-def get_initial_capacities(network_file):
+
+def get_initial_capacities(network_file, capacity_per_lane=DEFAULT_CAPACITY_PER_LANE):
     """
     Read the SUMO network and return a dictionary {edge_id: capacity}.
-    Capacity is estimated as number_of_lanes × 1800 veh/h.
+    Capacity is estimated as number_of_lanes × capacity_per_lane (veh/h).
     """
-    net = sumolib.net.readNet(network_file)
     initial_capacities = {}
-    for edge in net.getEdges():
+    for edge in _read_net(network_file).getEdges():
         edge_id = edge.getID()
         if edge_id.startswith(":"):  # skip internal edges
             continue
         lanes = edge.getLanes()
         if lanes:
-            initial_capacities[edge_id] = len(lanes) * 1800.0
+            initial_capacities[edge_id] = len(lanes) * capacity_per_lane
     return initial_capacities
 
 
-def apply_capacities_to_network(base_network_file, output_network_file, target_capacities):
+def apply_capacities_to_network(base_network_file, output_network_file, target_capacities,
+                                max_speed_factor=1.3, capacity_per_lane=DEFAULT_CAPACITY_PER_LANE):
     """
     Write a modified SUMO network where lane speeds are scaled proportionally
     to the ratio (target_capacity / original_capacity). This acts as a proxy
     for adjusting throughput without changing the number of lanes.
+
+    The speed scale factor is capped at `max_speed_factor`, so speed limits
+    stay plausible (e.g. 1.3 × 130 km/h ≈ 170 km/h) even when the learned
+    capacity is up to `capacity_max_factor` × base. Capacity reductions are
+    applied in full.
     """
-    original_capacities = get_initial_capacities(base_network_file)
+    original_capacities = get_initial_capacities(base_network_file, capacity_per_lane)
     tree = ET.parse(base_network_file)
     root = tree.getroot()
 
@@ -52,6 +65,7 @@ def apply_capacities_to_network(base_network_file, output_network_file, target_c
         original_cap = original_capacities[edge_id]
         new_cap = target_capacities.get(edge_id, original_cap)
         scale_factor = new_cap / original_cap if original_cap > 0 else 1.0
+        scale_factor = min(scale_factor, max_speed_factor)
 
         for lane_element in edge_element.findall("lane"):
             old_speed_attr = lane_element.get("speed")
@@ -64,133 +78,123 @@ def apply_capacities_to_network(base_network_file, output_network_file, target_c
 
 
 def run_sumo_simulation(network_file, tripinfo_output_rel, edgedata_output_rel,
-                        scenario_dir, begin=0, end=90000, summary_output_rel=None):
+                        scenario_dir, begin=0, end=90000, summary_output_rel=None,
+                        base_cfg="disaster.sumocfg", log_output_rel="outputs/iter.log",
+                        additional_files=None, route_files=None,
+                        hourly_edgedata_rel=None, hourly_period=3600,
+                        cfg_name="mod.iter.sumocfg", progress_desc="SUMO"):
     """
-    Launch a SUMO simulation using the given network and the standard route files.
-    The output file paths are relative to the scenario directory.
+    Launch a SUMO simulation of `base_cfg` with `network_file` swapped in.
+
+    Route files and additional files (including the disaster rerouter
+    `disaster_closures.add.xml`) are taken from `base_cfg`, so the run
+    reproduces the same disruption, demand (incl. buses/transit) and bus stops
+    as the static post-disaster simulation. Pass `additional_files` /
+    `route_files` (lists of paths) only to deliberately override the config.
+
+    If `hourly_edgedata_rel` is given, an additional edgedata output
+    aggregated every `hourly_period` seconds is written there (needed for
+    windowed KPIs).
+
+    Output file paths are relative to the scenario directory.
     """
-    cfg_file = os.path.join(scenario_dir, "dua.static.sumocfg")
-    modified_cfg_file = os.path.join(scenario_dir, "mod.iter.sumocfg")
-
-    tripinfo_output_abs = str(os.path.join(scenario_dir, tripinfo_output_rel))
-    output_dir = os.path.dirname(tripinfo_output_abs)
-    os.makedirs(output_dir, exist_ok=True)
-
-    tree = ET.parse(cfg_file)
-    root = tree.getroot()
     if summary_output_rel is None:
         summary_output_rel = tripinfo_output_rel.replace("tripinfo", "summary")
 
-    for element_name, relative_path in [("summary-output", summary_output_rel),
-                                        ("tripinfo-output", tripinfo_output_rel),
-                                        ("edgedata-output", edgedata_output_rel)]:
-        element = root.find(f".//{element_name}")
-        if element is not None:
-            element.set("value", relative_path)
-    tree.write(modified_cfg_file, encoding="UTF-8", xml_declaration=True)
+    tripinfo_output_abs = os.path.join(scenario_dir, tripinfo_output_rel)
+    os.makedirs(os.path.dirname(tripinfo_output_abs), exist_ok=True)
 
-    sumo_binary = "/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO/share/sumo/bin/sumo"
-    absolute_network_file = os.path.abspath(network_file)
+    extra_additional = []
+    if hourly_edgedata_rel is not None:
+        hourly_add_rel = os.path.splitext(hourly_edgedata_rel)[0] + ".add.xml"
+        write_hourly_edgedata_additional(os.path.join(scenario_dir, hourly_add_rel),
+                                         os.path.join(scenario_dir, hourly_edgedata_rel),
+                                         period=hourly_period)
+        extra_additional.append(hourly_add_rel)
 
-    additional_files = [
-        os.path.join(scenario_dir, "vtypes.add.xml"),
-        os.path.join(scenario_dir, "tll.static.xml"),
-    ]
+    modified_cfg_file = os.path.join(scenario_dir, cfg_name)
+    write_run_config(
+        os.path.join(scenario_dir, base_cfg), modified_cfg_file,
+        outputs={
+            "summary-output": summary_output_rel,
+            "tripinfo-output": tripinfo_output_rel,
+            "edgedata-output": edgedata_output_rel,
+            "log": log_output_rel,
+        },
+        extra_additional_files=extra_additional if additional_files is None else (),
+        remove_additional_files=STATIC_HOURLY_ADDITIONALS,
+    )
 
-    route_files = [
-        os.path.join(scenario_dir, "DUARoutes", "local.0.rou.xml"),
-        os.path.join(scenario_dir, "DUARoutes", "local.1.rou.xml"),
-        os.path.join(scenario_dir, "DUARoutes", "local.2.rou.xml"),
-    ]
+    extra_args = []
+    if additional_files is not None:
+        all_additional = list(additional_files) + [os.path.join(scenario_dir, a)
+                                                   for a in extra_additional]
+        extra_args += ["--additional-files", ",".join(all_additional)]
+    if route_files is not None:
+        extra_args += ["--route-files", ",".join(route_files)]
 
-    command = [
-        sumo_binary,
-        "-c", modified_cfg_file,
-        "--net-file", absolute_network_file,
-        "--begin", str(begin),
-        "--end", str(end),
-        "--additional-files", ",".join(additional_files),
-        "--route-files", ",".join(route_files),
-    ]
-
-    print("Running SUMO command:")
-    print(" ".join(command))
-
-    # Stream SUMO output line by line so progress is visible
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True, bufsize=1)
-    if process.stdout is not None:
-        for line in process.stdout:
-            print(line, end='')
-    process.wait()
-    if process.returncode != 0:
-        raise RuntimeError(f"SUMO exited with code {process.returncode}")
+    run_sumo(modified_cfg_file, net_file=network_file, begin=begin, end=end,
+             extra_args=extra_args, progress_desc=progress_desc)
 
 
-def get_edge_stresses(edgedata_file, network_file,
-                      current_capacities=None,
-                      sim_duration_hours=25.0):
-    """
-    Return a dictionary {edge_id: stress_value} for every non‑internal edge.
-    Flow is converted to average hourly rate using `sim_duration_hours`.
-    """
-    net = sumolib.net.readNet(network_file)
-    flows = load_edgedata(edgedata_file)
-    speeds = _load_edge_speeds(edgedata_file)
-    edge_stress_dict = {}
-
-    for edge in net.getEdges():
-        edge_id = edge.getID()
-        if edge_id.startswith(":"):
-            continue
-
-        total_flow = flows.get(edge_id, 0.0)
-        flow_rate = total_flow / sim_duration_hours
-
-        lanes = edge.getLanes()
-        if not lanes:
-            continue
-
-        if current_capacities is not None:
-            capacity = current_capacities.get(edge_id, len(lanes) * 1800.0)
-        else:
-            capacity = len(lanes) * 1800.0
-
-        free_flow_speed = float(lanes[0].getSpeed())
-        if free_flow_speed <= 0:
-            continue
-
-        actual_speed = speeds.get(edge_id, free_flow_speed)
-        actual_speed = max(actual_speed, 1e-3)
-
-        volume_ratio = flow_rate / capacity if capacity > 0 else 0.0
-        speed_drop = max(0.0, 1.0 - actual_speed / free_flow_speed)
-        stress = min(1.0, volume_ratio * speed_drop)
-        edge_stress_dict[edge_id] = stress
-
-    return edge_stress_dict
+def _capacity_factor_stats(capacities, base_capacities):
+    factors = [capacities[eid] / base for eid, base in base_capacities.items() if base > 0]
+    if not factors:
+        return {"capacity_factor_mean": 1.0, "capacity_factor_min": 1.0,
+                "capacity_factor_max": 1.0}
+    return {
+        "capacity_factor_mean": sum(factors) / len(factors),
+        "capacity_factor_min": min(factors),
+        "capacity_factor_max": max(factors),
+    }
 
 
 def eq_model(disaster_network_file, scenario_directory,
              max_iterations=30, learning_rate=0.1, memory_decay=math.exp(-1 / 30),
-             capacity_min_factor=0.5, capacity_max_factor=2.0,
-             convergence_tol=1e-4, verbose=True, begin_time=0, end_time=90000):
+             capacity_min_factor=0.5, capacity_max_factor=2.0, max_speed_factor=1.3,
+             convergence_tol=1e-4, verbose=True, begin_time=0, end_time=90000,
+             base_cfg="disaster.sumocfg", stress_window=None, entropy_window=None,
+             capacity_per_lane=DEFAULT_CAPACITY_PER_LANE):
     """
     Run the iterative equilibrium learning loop.
+
+    Parameters
+    ----------
+    disaster_network_file : str
+        The network whose capacities are adapted; it should be the same
+        network used by the static post-disaster run (the base `lust.net.xml`,
+        with closures applied via the rerouter in `base_cfg`). It also supplies
+        the lane counts and *original* free-flow speeds for the stress index,
+        so raising a capacity (which raises the simulated speed limit) does not
+        inflate the measured speed drop.
+    scenario_directory : str
+        Directory containing `base_cfg`; outputs go to its `outputs/` folder.
+    capacity_min_factor, capacity_max_factor : float
+        Bounds on each edge's learned capacity relative to its base capacity.
+    max_speed_factor : float
+        Cap on the speed-limit scaling used as the capacity proxy in SUMO.
+    begin_time, end_time : int
+        Simulated horizon (s), passed to SUMO. The default (0–90000 s, 25 h)
+        matches `disaster.sumocfg` and the baseline run.
+    stress_window, entropy_window : (begin_s, end_s), optional
+        Time windows for S and C (e.g. the closure hour (61200, 64800)).
+        None = whole horizon. Windowed KPIs use an hourly edgedata output the
+        loop writes itself.
+    capacity_per_lane : float
+        Nominal capacity per lane (veh/h).
 
     Returns
     -------
     final_E : float
-        Performance index after convergence.
+        Performance index of a final simulation with the learned capacities.
     final_capacities : dict
         Edge capacities (veh/h) at the end of the learning process.
-    history : list of tuples
-        (day, E, M, R, C, S) for each iteration.
+    history : list of dict
+        One entry per day: day, E, M, R, C, S, SRI components and capacity
+        factor statistics (capacities used for that day relative to base).
+        The last entry (day == "final") describes the final simulation.
     """
-    sim_duration_hours = (end_time - begin_time) / 3600.0
-
-    # Initial capacities from the base (undisrupted) network
-    base_capacities = get_initial_capacities(disaster_network_file)
+    base_capacities = get_initial_capacities(disaster_network_file, capacity_per_lane)
     current_capacities = base_capacities.copy()
 
     # Memory variables for SRI
@@ -202,81 +206,91 @@ def eq_model(disaster_network_file, scenario_directory,
     tripinfo_relative = "outputs/iter.tripinfo.xml"
     edgedata_relative = "outputs/iter.edgedata.xml"
     summary_relative = "outputs/iter.summary.xml"
+    hourly_edgedata_relative = "outputs/iter.hourly.edgedata.xml"
     tripinfo_absolute = os.path.join(scenario_directory, tripinfo_relative)
     edgedata_absolute = os.path.join(scenario_directory, edgedata_relative)
     summary_absolute = os.path.join(scenario_directory, summary_relative)
-    iterative_network_file: str = os.path.join(scenario_directory, "iter_lust.net.xml")
-    route_files_for_entropy = [
-        os.path.join(scenario_directory, "buslines.rou.xml"),
-        os.path.join(scenario_directory, "DUARoutes", "local.0.rou.xml"),
-        os.path.join(scenario_directory, "DUARoutes", "local.1.rou.xml"),
-        os.path.join(scenario_directory, "DUARoutes", "local.2.rou.xml"),
-        os.path.join(scenario_directory, "transit.rou.xml"),
-    ]
+    hourly_edgedata_absolute = os.path.join(scenario_directory, hourly_edgedata_relative)
+    iterative_network_file = os.path.join(scenario_directory, "iter_lust.net.xml")
 
     os.makedirs(os.path.dirname(tripinfo_absolute), exist_ok=True)
 
-    for day in range(1, max_iterations + 1):
-        # Write the network with the current capacities
-        apply_capacities_to_network(disaster_network_file, iterative_network_file,
-                                    current_capacities)
+    # Redundancy only depends on the network topology, which capacity updates
+    # (speed scaling) don't change, so it is computed once.
+    redundancy = compute_redundancy(disaster_network_file)
 
+    def simulate_and_evaluate(capacities, label):
+        apply_capacities_to_network(disaster_network_file, iterative_network_file,
+                                    capacities, max_speed_factor=max_speed_factor,
+                                    capacity_per_lane=capacity_per_lane)
         run_sumo_simulation(iterative_network_file, tripinfo_relative,
                             edgedata_relative, scenario_directory,
-                            summary_output_rel=summary_relative)
+                            begin=begin_time, end=end_time,
+                            summary_output_rel=summary_relative,
+                            base_cfg=base_cfg,
+                            hourly_edgedata_rel=hourly_edgedata_relative,
+                            progress_desc=label)
 
         throughput = compute_throughput(tripinfo_absolute, summary_absolute)
-        redundancy = compute_redundancy(iterative_network_file)
-        entropy = compute_entropy(tripinfo_absolute, route_files_for_entropy)
-        stress = compute_stress(iterative_network_file, edgedata_absolute, sim_duration_hours)
+        entropy = compute_link_entropy(
+            hourly_edgedata_absolute if entropy_window else edgedata_absolute,
+            disaster_network_file, window=entropy_window)
+        edge_stresses = compute_edge_stresses(
+            disaster_network_file,
+            hourly_edgedata_absolute if stress_window else edgedata_absolute,
+            capacity_per_lane=capacity_per_lane, window=stress_window,
+            capacities=capacities)
+        stress = (sum(edge_stresses.values()) / len(edge_stresses)) if edge_stresses else 0.0
+        kpis = {"M": throughput, "R": redundancy, "C": entropy, "S": stress}
+        return kpis, edge_stresses
 
-        kpi_dict = {"M": throughput, "R": redundancy, "C": entropy, "S": stress}
+    for day in range(1, max_iterations + 1):
+        kpi_dict, edge_stresses = simulate_and_evaluate(current_capacities, f"Day {day}/{max_iterations}")
         current_performance = performance_index_limited(kpi_dict)
-        history.append((day, current_performance, throughput, redundancy, entropy, stress))
 
         if verbose:
             print(f"Day {day:2d}: E={current_performance:.4f}  "
-                  f"M={throughput:.3f} R={redundancy:.3f} C={entropy:.3f} S={stress:.3f}")
+                  f"M={kpi_dict['M']:.3f} R={kpi_dict['R']:.3f} "
+                  f"C={kpi_dict['C']:.3f} S={kpi_dict['S']:.3f}")
 
         # ---------- Update SRI components ----------
+        stress = kpi_dict["S"]
         # Infrastructure pressure: exponential moving average of stress
         infrastructure_pressure = memory_decay * infrastructure_pressure + stress
-
         operational_elasticity = (
-                                         redundancy * (1.0 - stress)
-                                 ) / (1.0 + math.exp(-10.0 * (redundancy - 0.2)))
-
+            (redundancy * (1.0 - stress)) / (1.0 + math.exp(-10.0 * (redundancy - 0.2)))
+        )
         # Currently equal weights; can become adaptive later
         sri = 0.5 * operational_elasticity + 0.5 * infrastructure_pressure
 
-        # ---------- Per‑edge stress and short‑term gradient ----------
-        edge_stresses = get_edge_stresses(edgedata_absolute, iterative_network_file,
-                                          current_capacities)
-        average_stress = stress  # the global S is the average over all edges
+        history.append({
+            "day": day, "E": current_performance, **kpi_dict,
+            "sri": sri, "operational_elasticity": operational_elasticity,
+            "infrastructure_pressure": infrastructure_pressure,
+            **_capacity_factor_stats(current_capacities, base_capacities),
+        })
 
-        short_term_gradient = {}
-        for eid, edge_stress in edge_stresses.items():
-            edge_stress_value = float(edge_stress)
-            deviation = edge_stress_value - float(average_stress)
-            short_term_gradient[eid] = float(learning_rate) * deviation * float(sri)
+        # ---------- Short-term gradient ----------
+        # S is the mean of these per-edge stresses (same capacities, same
+        # window), so the deviations are centred on zero.
+        short_term_gradient = {
+            eid: learning_rate * (edge_stress - stress) * sri
+            for eid, edge_stress in edge_stresses.items()
+        }
 
         # ---------- Capacity update ----------
         new_capacities = {}
         for eid, cap in current_capacities.items():
-            cap_value = float(cap)
-            adjustment = float(short_term_gradient.get(eid, 0.0))
-            updated_cap = cap_value * (1.0 + adjustment)
-
+            updated_cap = cap * (1.0 + short_term_gradient.get(eid, 0.0))
             # Clip to allowed range relative to the original base capacity
-            base_cap = float(base_capacities.get(eid, cap_value))
-            lower_bound = base_cap * capacity_min_factor
-            upper_bound = base_cap * capacity_max_factor
-            new_capacities[eid] = max(lower_bound, min(upper_bound, updated_cap))
-
+            base_cap = base_capacities.get(eid, cap)
+            new_capacities[eid] = max(base_cap * capacity_min_factor,
+                                      min(base_cap * capacity_max_factor, updated_cap))
         current_capacities = new_capacities
 
         # ---------- Convergence check ----------
-        if previous_performance is not None and abs(current_performance - previous_performance) < convergence_tol:
+        if (previous_performance is not None
+                and abs(current_performance - previous_performance) < convergence_tol):
             stable_count += 1
             if stable_count >= 5:
                 if verbose:
@@ -286,21 +300,11 @@ def eq_model(disaster_network_file, scenario_directory,
             stable_count = 0
         previous_performance = current_performance
 
-    # Final clean simulation with the converged capacities
-    apply_capacities_to_network(disaster_network_file, iterative_network_file,
-                                current_capacities)
-    run_sumo_simulation(iterative_network_file, tripinfo_relative,
-                        edgedata_relative, scenario_directory,
-                        summary_output_rel=summary_relative)
-
-    final_throughput = compute_throughput(tripinfo_absolute, summary_absolute)
-    final_redundancy = compute_redundancy(iterative_network_file)
-    final_entropy = compute_entropy(tripinfo_absolute, route_files_for_entropy)
-    final_stress = compute_stress(iterative_network_file, edgedata_absolute)
-
-    final_kpis = {"M": final_throughput, "R": final_redundancy,
-                  "C": final_entropy, "S": final_stress}
+    # Final clean simulation with the learned capacities
+    final_kpis, _ = simulate_and_evaluate(current_capacities, "Final run")
     final_performance = performance_index_limited(final_kpis)
+    history.append({"day": "final", "E": final_performance, **final_kpis,
+                    **_capacity_factor_stats(current_capacities, base_capacities)})
 
     if verbose:
         print(f"Final E = {final_performance:.4f}")
