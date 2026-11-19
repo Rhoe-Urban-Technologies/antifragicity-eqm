@@ -6,3 +6,5 @@
 *.pyc
 venv/
 .venv/
+# Learning-loop run records (luxembourg_example_eq_model.py)
+eq_model_iter_logs/
