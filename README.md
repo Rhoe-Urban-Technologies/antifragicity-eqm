@@ -381,9 +381,9 @@ Then commit the new submodule pointer in this repository
 The learning loop (`eq_model.py`) does not depend on these config changes: it
 writes its own hourly edgedata additional and passes `--end` on the command line.
 
-Not done yet (see "Suggested future changes" in `CHANGELOG.md`):
-`device.rerouting.probability` is 0.70 in `dua.static.sumocfg` and 1.00 in
-`disaster.sumocfg`; set both to the same value before comparing runs.
+Not done yet: `device.rerouting.probability` is 0.70 in `dua.static.sumocfg`
+and 1.00 in `disaster.sumocfg`; set both to the same value before comparing
+runs.
 
 #### 3.3.3 Run the baseline and disaster simulations
 
@@ -545,9 +545,9 @@ Each run is recorded in `eq_model_iter_logs/<timestamp>/` (ignored by git):
   "running"`) and updated at the end (`"finished"`).
 - `capacities.json` – the learned capacity of every edge.
 
-Example output (note: produced **before** the 2026‑11‑17 fixes listed in
-`CHANGELOG.md`, which change how stress, entropy, the disruption and $R$ are
-computed; these numbers need to be regenerated):
+Example output (note: produced **before** the 2026‑11‑17 fixes to how stress,
+entropy, the disruption and $R$ are computed; these numbers need to be
+regenerated):
 
 ```commandline
 Performance:
