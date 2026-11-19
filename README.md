@@ -3,6 +3,20 @@
 This repository contains code to replicate and extend the quantitative vulnerability
 assessment described in deliverable **D3.2**.
 
+| File | Purpose |
+|---|---|
+| `kpi_functions.py` | KPIs $M, R, C, S$, performance indices, $\Delta E$, impact classes |
+| `eq_model.py` | Iterative equilibrium (learning) loop over SUMO runs (§4) |
+| `scenario_config.py` | Paths, horizon and KPI windows for the LuST scenario |
+| `sumo_runner.py` | Finds the SUMO binary, writes per-run configs, runs SUMO |
+| `luxembourg_example.py` | Static baseline vs. post‑disaster assessment (§3) |
+| `luxembourg_example_eq_model.py` | Static assessment + learning loop, with a run record |
+| `bratislava_flood_example.py` | D3.2 worked example (§2) |
+| `demo_eq_model.py` | Learning loop on a synthetic 4‑edge network |
+| `parallel_simulations.py` | Runs several SUMO simulations at once (work in progress) |
+| `tests/` | `pytest` suite (no SUMO needed) |
+| `AntifragiCity-WP4/` | Submodule with the LuST scenario and WP4 scripts |
+
 ## 1. KPI functions
 
 The module `kpi_functions.py` computes four core network performance indicators
@@ -59,34 +73,39 @@ The function `compute_redundancy(net_file)` builds a directed graph with
 the SUMO network; edge attributes (length, free‑flow speed) are not used for
 this metric.
 
+OD pairs are sampled with a fixed seed (`seed=42` by default, over the sorted
+node list), so $R$ is reproducible and the baseline and post‑disaster networks
+are evaluated on the same OD sample. Pass `seed=None` for random sampling.
+
 ---
 ### 1.3 Flow Entropy ($C$)
 
-**Formula**  
+**Formula** (D3.2 Annex B, Indicator R2, Eq. 17)
 
-Let $f_i$ be the number of trips for OD pair $i$, and $K$ the total number of
-OD pairs with non‑zero flow.
+Let $f_i$ be the number of vehicles that entered link $i$, and $N$ the total
+number of (non‑internal) links in the network, including links without flow.
 
-$$ p_i = \frac{f_i}{\sum_j f_j} $$
+$$ p_i = \frac{f_i}{\sum_j f_j} \qquad\qquad
+   C = \frac{-\sum_i p_i \log p_i}{\log N} $$
 
-$$ H = -\sum_i p_i \log_2 p_i \qquad\qquad
-   H_{\max} = \log_2 K $$
+$C = 0$ indicates all flow is on a single link; $C = 1$ indicates flow spread
+evenly over all links. When links are closed, flow concentrates on the
+remaining links and $C$ drops, so this KPI reacts to disruptions.
 
-$$ C = \frac{H}{H_{\max}} $$
+**SUMO data sources** – `edgedata.xml` (attribute `entered`) and the network
+file (for $N$)  
+`compute_link_entropy(edgedata_file, net_file, window=None)` is the default $C$
+used by the examples and the learning loop. With `window=(begin_s, end_s)` it
+uses only that part of the day (this needs hourly edgedata, see §1.4).
 
-$C = 0$ indicates all flow is concentrated on a single OD pair; $C = 1$
-indicates a perfectly uniform distribution.
+**OD-based variants** – `compute_entropy(tripinfo_file, route_files=None)`
+computes the entropy of the origin–destination distribution instead (D3.2 §4
+describes $C$ this way, while Annex B gives the link-flow formula above):
 
-**SUMO data sources** – `tripinfo.xml` and optionally route files (`*.rou.xml`)  
-The function `compute_entropy(tripinfo_file, route_files=None)` supports two
-modes:
-
-- default (tripinfo-only): builds OD flows from executed trips,
-- demand mode (recommended for comparisons): builds OD flows from route files
-  so demand discarded before departure is still included.
-
-Using route-file demand avoids overestimating entropy when many trips are
-discarded due to departure constraints and never appear in tripinfo.
+- default (tripinfo-only): OD flows from executed trips,
+- demand mode (`route_files` given): OD flows from planned demand, so trips
+  discarded before departure are included. This is identical for every
+  scenario that loads the same route files, so it cannot show a disruption.
 
 ### 1.4 Stress Index ($S$)
 
@@ -99,25 +118,41 @@ $$ \text{stress}_a = \min\!\left(
 
 where  
 
-- $f_a$   = vehicle count on edge $a$ during the simulation period,  
-- $C_a$   = capacity of edge $a$ (number of lanes × 1800 veh/h),  
-- $v_a$   = actual speed on edge $a$ (m/s),  
+- $f_a$   = flow on edge $a$ (veh/h): vehicles entered during the measurement
+  period ÷ the period length,  
+- $C_a$   = capacity of edge $a$ (number of lanes × 1800 veh/h, or a supplied
+  per-edge capacity),  
+- $v_a$   = mean speed on edge $a$ during the period (m/s),  
 - $v_{0,a}$ = free‑flow speed of edge $a$ (m/s).
 
 The overall stress index is the unweighted average over all non‑internal edges:
 
 $$ S = \frac{1}{|A|} \sum_{a \in A} \text{stress}_a $$
 
+**Measurement window** – averaged over a whole 25 h day, flows are far below
+capacity and $S \approx 0$. The examples therefore measure $S$ over a fixed
+window, by default the closure hour 17:00–18:00 (`STRESS_WINDOW` in
+`scenario_config.py`), using the same window for baseline and post‑disaster
+runs. `compute_stress(net_file, edgedata_file, window=(61200, 64800))` needs
+edgedata aggregated hourly. The scenario configs write it via
+`edgedata.hourly.baseline.add.xml` / `edgedata.hourly.disaster.add.xml`
+(local submodule changes, see §3.3.2), and
+the learning loop writes its own. Without `window`, the period length is taken
+from the edgedata intervals, so it always matches the simulated horizon.
+
 **SUMO data sources**  
 
 - **`edgedata.xml`** – flow (attribute `entered` or `left`) and, if available,
-  speed (attribute `speed`). If speed is missing, the function falls back to
-  the free‑flow speed (yielding zero stress).  
+  speed (attribute `speed`). With several intervals, flows are summed and
+  speeds are averaged weighted by `sampledSeconds`. If speed is missing, the
+  function falls back to the free‑flow speed (yielding zero stress).  
 - **`.net.xml`** – lane count and free‑flow speed (`speed` attribute of the
   first lane of each edge).  
 
-The function `compute_stress(net_file, edgedata_file)` internally calls
-`load_edgedata` and `_load_edge_speeds` to collect the required measurements.
+`compute_edge_stresses(...)` returns the per-edge values and `compute_stress(...)`
+their mean. All options after the two file paths are keyword‑only:
+`capacity_per_lane`, `sim_duration_hours`, `window` and `capacities` (a
+`{edge_id: veh/h}` override, used for the learned capacities in §4).
 
 ### 1.5 Performance index
 
@@ -134,6 +169,30 @@ $$ \Delta E = 1 - \frac{E_{\text{post}}}{E_{\text{base}}} \qquad (E_{\text{base}
 This formula is applied identically regardless of which performance index is used
 (full or limited). The function `system_vulnerability(E_base, E_post)` returns a
 single number; $\Delta E \le 0$ indicates no loss (or an improvement).
+D3.2 (Eq. 10) defines $\Delta E_s = \max(0,\, 1 - E_{\text{post}}/E_{\text{base}})$;
+the function deliberately does **not** clamp, so improvements (e.g. after the
+learning loop in §4) stay visible. Clamp when reporting against D3.2.
+
+### 1.7 Impact classification
+
+`classify_vulnerability(delta)` maps $\Delta E_s$ (or a group-level
+$\Delta Q_s$) to the D3.2 impact scale (Table 9, Eq. 20) and returns
+`(class, label)`:
+
+| Class | Label | $\Delta E_s$ |
+|---|---|---|
+| 0 | No performance loss | $\le 0$ |
+| 1 | Negligible | $< 0.05$ |
+| 2 | Minor | $0.05$–$0.15$ |
+| 3 | Moderate | $(0.15,\ 0.30]$ |
+| 4 | Major | $(0.30,\ 0.50]$ |
+| 5 | Catastrophic | $> 0.50$ |
+
+Values on a boundary go to the lower class, following the right-closed
+intervals of D3.2 Eq. 10 (e.g. $(0.15, 0.30]$ = Moderate). The exception is
+0.05, which Table 9 puts in Minor. The D3.2 equity escalation rule
+($r_{\text{equity}} > 1.5$ raises the class by one, Eq. 27) is not applied,
+because $r_{\text{equity}}$ is not computed.
 
 ## 2. Bratislava Flood Example (`bratislava_flood_example.py`)
 
@@ -149,18 +208,32 @@ values** provided in the deliverable to compute:
 The script requires no external data and serves as a **reference implementation**
 of the D3.2 vulnerability formulas.
 
-**Output** (matches the deliverable exactly):
+**Output** (the $E$, $\Delta E$ and $\Delta Q$ values match the deliverable):
 
-E_base = 0.7250 E_post = 0.5167
-System vulnerability ΔE = 0.287 → Moderate to Major vulnerability
-Equity vulnerability ΔQ = 0.307 → Major equity vulnerability for elderly
+```commandline
+Performance index E_base = 0.7250
+Performance index E_post = 0.5167
+System vulnerability ΔE_s = 1 - 0.5167/0.7250 = 0.2874
+  → (0.29 : Class 3 – Moderate vulnerability, D3.2 Table 9)
+Equity vulnerability ΔQ_s = (0.48 - 0.25) / (1 - 0.25) = 0.3067
+  → (0.31 : Class 4 – Major equity vulnerability for elderly)
+```
+
+The labels come from `classify_vulnerability` (see §1.7), which implements the
+D3.2 impact scale. In the deliverable's worked example (Step 3.5) the text calls
+$\Delta E = 0.287$ "Moderate to Major (threshold 0.30)", but 0.287 is below that
+threshold and falls in the Moderate band of Table 9 (0.15–0.30), so it is
+reported as Moderate here. $\Delta Q = 0.31$ is Major in both.
 
 ## 3. Luxembourg LuST Scenario Vulnerability Assessment
 
 We applied the same vulnerability methodology to the **LuST scenario**
 (Luxembourg SUMO Traffic) by comparing a **baseline** simulation with a
 **post‑disaster** simulation in which six critical edges are closed during the
-morning peak (07:00–10:00) via a SUMO rerouter.
+evening peak (17:00–18:00, i.e. 61200–64800 s) via a SUMO rerouter
+(`disaster_closures.add.xml`, loaded by `disaster.sumocfg`). The post‑disaster
+run uses the same base network `lust.net.xml` as the baseline; the edges are
+only closed by the rerouter during that interval.
 
 ### 3.1 Simplified performance index
 
@@ -261,23 +334,119 @@ used by the current examples.
 
 #### 3.3.1 Install requirements
 
-- Python 3.8+
-- SUMO ≥ 1.20 (with `netconvert` and `sumo` on PATH)
-- Python packages: `sumolib`, `networkx`, `matplotlib`
+- Python 3.10+ (the code uses `X | None` type hints)
+- SUMO ≥ 1.20. The scripts find the `sumo` binary via `$SUMO_BINARY`,
+  `$SUMO_HOME/bin`, `PATH`, or the default macOS EclipseSUMO location (see
+  `sumo_runner.find_sumo_binary`).
+- Python packages:
 
 ```bash
-pip install sumolib networkx matplotlib
+pip install -r requirements.txt        # sumolib, networkx, tqdm (+ matplotlib for the submodule plots)
+pip install -r requirements-dev.txt    # adds pytest
 ```
 
-### 3.3.2 Follow the instructions in
-`T4.1-KPIs/readme.md` to run the baseline and disaster simulations. This will generate output files in
-`T4.1-KPIs/LuSTScenario-master/scenario/baseline` for the baseline run and `T4.1-KPIs/LuSTScenario-master/scenario/outputs` for the "post-disaster" run.
+#### 3.3.2 Prepare the scenario configs (local changes to the submodule)
 
-### 3.3.3 Run `luxembourg_example.py` to compute KPIs and vulnerability
+The `AntifragiCity-WP4` submodule is maintained in a separate repository that
+this project cannot push to, so the scenario changes this project relies on are
+**not** in the submodule commit it points to. After cloning (and after every
+`git submodule update`, which resets these files), apply them by hand in
+`AntifragiCity-WP4/T4.1-KPIs/LuSTScenario-master/scenario/`:
+
+1. **Create `edgedata.hourly.baseline.add.xml`** (hourly edgedata for the
+   baseline; the `file` path is relative to this add file):
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <additional>
+       <edgeData id="hourly" file="baseline/dua.static.hourly.edgedata.xml" period="3600"/>
+   </additional>
+   ```
+
+2. **Create `edgedata.hourly.disaster.add.xml`**:
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <additional>
+       <edgeData id="hourly" file="outputs/disaster.hourly.edgedata.xml" period="3600"/>
+   </additional>
+   ```
+
+3. **`dua.static.sumocfg`**: append `edgedata.hourly.baseline.add.xml` to
+   `additional-files`:
+
+   ```xml
+   <additional-files value="vtypes.add.xml,busstops.add.xml,e1detectors.add.xml,lust.poly.xml,tll.static.xml,edgedata.hourly.baseline.add.xml"/>
+   ```
+
+4. **`disaster.sumocfg`**: append `edgedata.hourly.disaster.add.xml` to
+   `additional-files` and run for 25 h, like the baseline:
+
+   ```xml
+   <additional-files value="vtypes.add.xml,busstops.add.xml,e1detectors.add.xml,lust.poly.xml,tll.static.xml,disaster_closures.add.xml,edgedata.hourly.disaster.add.xml"/>
+   ...
+   <end value="90000"/>
+   ```
+
+   (`get_benchmark.py` already passes `--end 90000` for the baseline.)
+
+Check: `git -C AntifragiCity-WP4 status` should list the two configs as
+modified and the two add files as untracked. Without steps 1–4 the
+simulations produce no `*.hourly.edgedata.xml`, and `luxembourg_example.py`
+stops and names the missing file.
+
+The learning loop (`eq_model.py`) does **not** need these changes: it writes
+its own hourly edgedata additional, removes the static one from its run
+config, and passes `--end` on the command line.
+
+Not done here, but see "Suggested future changes" in `CHANGELOG.md`:
+`device.rerouting.probability` is 0.70 in `dua.static.sumocfg` and 1.00 in
+`disaster.sumocfg`; set both to the same value before comparing runs.
+
+#### 3.3.3 Run the baseline and disaster simulations
+
+Follow `AntifragiCity-WP4/readme.md`. From `AntifragiCity-WP4/T4.1-KPIs/`:
+
+```bash
+python get_benchmark.py                                  # baseline → scenario/baseline/
+sumo -c LuSTScenario-master/scenario/disaster.sumocfg    # post-disaster → scenario/outputs/
+```
+
+With the changes from §3.3.2, both runs last 25 h (0–90000 s) and also write
+hourly edgedata (`*.hourly.edgedata.xml`), which the windowed stress index
+needs. Outputs
+produced before these config changes have no hourly file and must be
+regenerated.
+
+To get a progress bar (tqdm) instead of SUMO's raw step log, run a config
+through `sumo_runner.py` from the repository root; extra SUMO options are
+passed through:
+
+```bash
+python sumo_runner.py AntifragiCity-WP4/T4.1-KPIs/LuSTScenario-master/scenario/disaster.sumocfg
+```
+
+The learning loop (`luxembourg_example_eq_model.py`) shows one bar per
+simulated day ("Day 3/30", then "Final run"). The bar needs `tqdm` in the
+interpreter you run with (use `.venv`); it appears in terminals and in
+PyCharm's run console, and `SUMO_PROGRESS=1` / `0` forces it on or off.
+
+#### 3.3.4 Run `luxembourg_example.py` to compute KPIs and vulnerability
 
 ```bash
 python luxembourg_example.py
 ```
+
+All paths and the KPI windows are defined in `scenario_config.py`.
+
+#### 3.3.5 Run the tests
+
+```bash
+python -m pytest
+```
+
+The tests use a small synthetic network (`tests/data/small.net.xml`) and do
+not need SUMO.
 
 ## 4. Iterative Equilibrium Model
 
@@ -289,23 +458,38 @@ index after a disruption. This is implemented in `eq_model.py`.
 ### 4.1 How the learning loop works
 
 The loop starts from the **post‑disaster** capacities (the same base network,
-with closures applied via the rerouter). Each iteration (one “day”) performs:
+with closures applied via the rerouter). Redundancy $R$ is computed once,
+because capacity updates do not change the network topology. Each iteration
+(one “day”) performs:
 
 1. **Apply current capacities** – writes a modified SUMO network where lane
    speeds are scaled proportionally to the capacity ratio (a proxy for changing
-   throughput).
-2. **Run SUMO simulation** – same route files and rerouter closures as the
-   disaster run.
-3. **Compute core KPIs** – $M, R, C, S$ from the resulting `tripinfo.xml` and
-   `edgedata.xml`.
+   throughput). The speed factor is capped at `max_speed_factor` (default 1.3)
+   so speed limits stay plausible, while the learned capacity itself can range
+   over $[0.5, 2.0] \times$ base.
+2. **Run SUMO simulation** – runs `disaster.sumocfg` with the modified network
+   swapped in, so it uses the same route files (including buses/transit), bus
+   stops and rerouter closures as the static disaster run. The simulated
+   horizon (`begin_time`/`end_time`, default 0–90000 s, i.e. 25 h like the
+   baseline) is passed to SUMO. The loop also writes its own hourly edgedata
+   for windowed KPIs.
+3. **Compute core KPIs** – $M$ from `tripinfo.xml`/`summary.xml`, link entropy
+   $C$ and per‑edge stress from edgedata. Stress uses the **original** network
+   for free‑flow speeds and lane counts and the **learned** capacities for
+   $C_a$. Otherwise raising a capacity (which raises the simulated speed limit)
+   would raise the measured speed drop and make stress go *up*. $S$ is the
+   mean of the per‑edge stresses; `stress_window` / `entropy_window` restrict
+   $S$ / $C$ to a time window (the example uses the closure hour for $S$).
 4. **Update SRI components** – operational elasticity and infrastructure pressure.
-5. **Calculate per‑edge stress** and a **short‑term capacity gradient** $g_{\text{short}}$.
+5. **Calculate a short‑term capacity gradient** $g_{\text{short}}$ from the
+   per‑edge stresses (§4.3).
 6. **Update capacities** – multiply each edge’s capacity by $(1 + g_{\text{short}})$,
    then clip to $[0.5 \times \text{base}, 2.0 \times \text{base}]$.
 7. **Check convergence** – stop when the performance index $E$ stabilises for
    five consecutive days.
 
-The final configuration is the **antifragile equilibrium** for the given disruption.
+A final simulation with the learned capacities gives the reported $E$. The
+final configuration is the **antifragile equilibrium** for the given disruption.
 
 ### 4.2 System Responsiveness Index (SRI)
 
@@ -335,7 +519,9 @@ $$
 Because the true gradient $\nabla_c \bar{E}$ is not directly available, we use a
 **heuristic**:
 
-- For each edge $a$, compute its stress deviation $(\text{stress}_a - S_{\text{avg}})$.
+- For each edge $a$, compute its stress deviation $(\text{stress}_a - S_{\text{avg}})$,
+  where both $\text{stress}_a$ and $S_{\text{avg}}$ (their mean) are computed
+  with the edges' *current* capacities.
 - Multiply by the learning rate $\eta_s = 0.1$ and the current SRI value:
 
 $$
@@ -351,19 +537,35 @@ they will be added in a future version.
 
 ### 4.4 Running the iterative model
 
-The script `luxembourg_example_eq_model.py` calls `eq_model` after
-the static vulnerability assessment. Example:
+The script `luxembourg_example_eq_model.py` runs the static assessment
+(§3), then `eq_model` with the settings in its `EQ_SETTINGS` dictionary:
 
 ```python
+import scenario_config as cfg
 from eq_model import eq_model
 
 E_final, final_caps, history = eq_model(
-    DISASTER_NET, scenario_dir,
-    max_iterations=3, learning_rate=0.1, verbose=True
+    cfg.DISASTER_NET, cfg.SCENARIO_DIR,
+    max_iterations=3, learning_rate=0.1,
+    stress_window=cfg.STRESS_WINDOW, verbose=True,
 )
 ```
 
-Example output:
+`history` is a list of dicts, one per day (`day`, `E`, `M`, `R`, `C`, `S`, SRI
+components, and mean/min/max capacity factor relative to base). The last entry
+(`day == "final"`) describes the final simulation.
+
+Each run is recorded in `eq_model_iter_logs/<timestamp>/` (ignored by git):
+
+- `run.json` – all settings, provenance (commit and uncommitted-changes flag
+  of this repo and the submodule, SUMO version), the static KPIs, the history
+  and the final result. It is written before the loop starts (`"status":
+  "running"`) and updated at the end (`"finished"`).
+- `capacities.json` – the learned capacity of every edge.
+
+Example output (note: produced **before** the 2026‑11‑17 fixes listed in
+`CHANGELOG.md`, which change how stress, entropy, the disruption and $R$ are
+computed; these numbers need to be regenerated):
 
 ```commandline
 Performance:
