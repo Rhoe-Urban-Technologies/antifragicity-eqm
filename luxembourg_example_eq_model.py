@@ -1,71 +1,102 @@
 """Luxembourg vulnerability assessment + iterative equilibrium model."""
 import json
-import sys, os
-sys.path.append(os.path.dirname(__file__))
-
-from kpi_functions import (
-    compute_throughput, compute_redundancy, compute_entropy, compute_stress,
-    performance_index_limited, system_vulnerability
-)
-from eq_model import eq_model
+import math
+import os
+import subprocess
+import sys
 from datetime import datetime
 
-LUST_BASE = "AntifragiCity-WP4/T4.1-KPIs/LuSTScenario-master"
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-BASELINE_NET = os.path.join(LUST_BASE, "scenario", "lust.net.xml")
-BASELINE_TRIPINFO = os.path.join(LUST_BASE, "scenario", "baseline", "dua.static.tripinfo.xml")
-BASELINE_SUMMARY = os.path.join(LUST_BASE, "scenario", "baseline", "dua.static.summary.xml")
-BASELINE_EDGEDATA = os.path.join(LUST_BASE, "scenario", "baseline", "dua.static.edgedata.xml")
-DISASTER_NET = os.path.join(LUST_BASE, "scenario", "disaster", "disaster.lust.net.xml")
-DISASTER_TRIPINFO = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.tripinfo.xml")
-DISASTER_SUMMARY = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.summary.xml")
-DISASTER_EDGEDATA = os.path.join(LUST_BASE, "scenario", "outputs", "disaster.edgedata.xml")
+import scenario_config as cfg
+from eq_model import eq_model
+from kpi_functions import classify_vulnerability, system_vulnerability
+from luxembourg_example import static_assessment
+from sumo_runner import find_sumo_binary
 
-ROUTE_FILES = [
-    os.path.join(LUST_BASE, "scenario", "buslines.rou.xml"),
-    os.path.join(LUST_BASE, "scenario", "DUARoutes", "local.0.rou.xml"),
-    os.path.join(LUST_BASE, "scenario", "DUARoutes", "local.1.rou.xml"),
-    os.path.join(LUST_BASE, "scenario", "DUARoutes", "local.2.rou.xml"),
-    os.path.join(LUST_BASE, "scenario", "transit.rou.xml"),
-]
+# Every setting that affects the learning loop; stored with each run.
+EQ_SETTINGS = {
+    "max_iterations": 30,
+    "learning_rate": 0.1,
+    "memory_decay": math.exp(-1 / 30),
+    "capacity_min_factor": 0.5,
+    "capacity_max_factor": 2.0,
+    "max_speed_factor": 1.3,
+    "convergence_tol": 1e-4,
+    "begin_time": cfg.SIM_BEGIN,
+    "end_time": cfg.SIM_END,
+    "base_cfg": cfg.DISASTER_CFG,
+    "stress_window": cfg.STRESS_WINDOW,
+    "entropy_window": cfg.ENTROPY_WINDOW,
+}
 
-history_output_file = './eq_model_iter_logs/' + datetime.now().strftime("%Y%m%d-%H%M%S") + '/history.json'
+
+def _git_state(path):
+    """Commit hash and whether the working tree has uncommitted changes."""
+    try:
+        commit = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "-C", path, "status", "--porcelain"],
+                                    capture_output=True, text=True, check=True).stdout.strip())
+        return {"commit": commit, "dirty": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None}
+
+
+def _sumo_version():
+    try:
+        output = subprocess.run([find_sumo_binary(), "--version"],
+                                capture_output=True, text=True).stdout
+        return output.splitlines()[0] if output else None
+    except (OSError, FileNotFoundError):
+        return None
+
+
+def _write_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
 
 if __name__ == "__main__":
-    # Static vulnerability
+    run_dir = os.path.join(cfg.EQ_MODEL_LOG_DIR, datetime.now().strftime("%Y%m%d-%H%M%S"))
+    # Created up front so a long SUMO run can't fail at the very end.
+    os.makedirs(run_dir, exist_ok=True)
+    run_file = os.path.join(run_dir, "run.json")
+
+    record = {
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "status": "running",
+        "settings": {**EQ_SETTINGS,
+                     "disaster_network_file": os.path.relpath(cfg.DISASTER_NET, cfg.REPO_ROOT)},
+        "provenance": {
+            "repo": _git_state(cfg.REPO_ROOT),
+            "submodule": _git_state(os.path.join(cfg.REPO_ROOT, "AntifragiCity-WP4")),
+            "sumo_version": _sumo_version(),
+        },
+    }
+
     print("=== Static Vulnerability Assessment ===")
-    M_base = compute_throughput(BASELINE_TRIPINFO, BASELINE_SUMMARY)
-    R_base = compute_redundancy(BASELINE_NET)
-    C_base = compute_entropy(BASELINE_TRIPINFO, ROUTE_FILES)
-    S_base = compute_stress(BASELINE_NET, BASELINE_EDGEDATA)
-    print(f"Baseline: M={M_base:.4f} R={R_base:.4f} C={C_base:.4f} S={S_base:.4f}")
+    record["static"] = static_assessment(stress_window=cfg.STRESS_WINDOW,
+                                         entropy_window=cfg.ENTROPY_WINDOW)
+    _write_json(run_file, record)
 
-    if not (os.path.exists(DISASTER_TRIPINFO) and os.path.exists(DISASTER_EDGEDATA)):
-        sys.exit("Disaster output files missing. Run the disaster simulation first.")
-
-    M_post = compute_throughput(DISASTER_TRIPINFO, DISASTER_SUMMARY)
-    R_post = compute_redundancy(DISASTER_NET)
-    C_post = compute_entropy(DISASTER_TRIPINFO, ROUTE_FILES)
-    S_post = compute_stress(DISASTER_NET, DISASTER_EDGEDATA)
-    print(f"Post-disaster: M={M_post:.4f} R={R_post:.4f} C={C_post:.4f} S={S_post:.4f}")
-
-    E_base = performance_index_limited({"M": M_base, "R": R_base, "C": C_base, "S": S_base})
-    E_post = performance_index_limited({"M": M_post, "R": R_post, "C": C_post, "S": S_post})
-    dE = system_vulnerability(E_base, E_post)
-    print(f"Static vulnerability ΔE = {dE:.4f}\n")
-
-    print("=== Iterative Equilibrium Learning ===")
-    scenario_dir = os.path.join(LUST_BASE, "scenario")
-    iter_trip = os.path.join(scenario_dir, "outputs", "iter.tripinfo.xml")
-    iter_edge = os.path.join(scenario_dir, "outputs", "iter.edgedata.xml")
-    E_final, final_caps, history = eq_model(
-        DISASTER_NET, scenario_dir,
-        max_iterations=3, learning_rate=0.1, verbose=True
-    )
+    print("\n=== Iterative Equilibrium Learning ===")
+    E_final, final_caps, history = eq_model(cfg.DISASTER_NET, cfg.SCENARIO_DIR,
+                                            verbose=True, **EQ_SETTINGS)
+    E_base, E_post = record["static"]["E_base"], record["static"]["E_post"]
     dE_learned = system_vulnerability(E_base, E_final)
+    cls, label = classify_vulnerability(dE_learned)
+
     print(f"\nInitial post-disaster E = {E_post:.4f}")
     print(f"Final (after learning)   E = {E_final:.4f}")
-    print(f"Vulnerability after learning ΔE = {dE_learned:.4f}")
+    print(f"Vulnerability after learning ΔE = {dE_learned:.4f}  → Class {cls} – {label}")
 
-    with (open(history_output_file, 'w')) as history_file:
-        json.dump(history, history_file)
+    record.update({
+        "status": "finished",
+        "history": history,
+        "final": {"E": E_final, "delta_E": dE_learned,
+                  "impact_class": cls, "impact_label": label},
+    })
+    _write_json(run_file, record)
+    _write_json(os.path.join(run_dir, "capacities.json"), final_caps)
+    print(f"\nRun record written to {run_dir}")
