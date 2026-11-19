@@ -7,7 +7,7 @@ Uses the synthetic KPI values from the worked example to compute:
   - Equity vulnerability ΔQ_s
 """
 
-from kpi_functions import performance_index, system_vulnerability
+from kpi_functions import performance_index, system_vulnerability, classify_vulnerability
 
 def compute_equity_vulnerability(Q_base: float, Q_post: float) -> float:
     """Equity vulnerability ΔQ_s = (Q_post - Q_base) / (1 - Q_base)."""
@@ -53,11 +53,13 @@ def main():
 
     print("=== Vulnerability Assessment ===")
     print(f"System vulnerability ΔE_s = 1 - {E_post:.4f}/{E_base:.4f} = {delta_E_system:.4f}")
-    print(f"  → ({delta_E_system:.2f} : {'Moderate to Major' if delta_E_system >= 0.30 else 'Minor to Moderate'} vulnerability)\n")
+    cls_E, label_E = classify_vulnerability(delta_E_system)
+    print(f"  → ({delta_E_system:.2f} : Class {cls_E} – {label_E} vulnerability, D3.2 Table 9)\n")
 
     print(f"Equity penalty increase: Q from {baseline_kpis['Q']} to {post_kpis['Q']}")
     print(f"Equity vulnerability ΔQ_s = ({post_kpis['Q']} - {baseline_kpis['Q']}) / (1 - {baseline_kpis['Q']}) = {delta_Q_equity:.4f}")
-    print(f"  → ({delta_Q_equity:.2f} : Major equity vulnerability for elderly)")
+    cls_Q, label_Q = classify_vulnerability(delta_Q_equity)
+    print(f"  → ({delta_Q_equity:.2f} : Class {cls_Q} – {label_Q} equity vulnerability for elderly)")
 
 if __name__ == "__main__":
     main()

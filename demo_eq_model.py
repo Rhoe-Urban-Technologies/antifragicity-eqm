@@ -1,6 +1,9 @@
 """Synthetic demo of the equilibrium model with meaningful dynamics."""
 
-import math, copy
+import copy
+import math
+
+from kpi_functions import performance_index_limited
 
 # ----------------------------------------------------------------------
 # Mock KPI functions that depend on capacities
@@ -58,11 +61,6 @@ def mock_kpis(caps):
     return M, R, C, S, stresses
 
 
-def performance_index_limited(kpis):
-    M, R, C, S = kpis
-    return (M + R + C - S + 1) / 4
-
-
 def demo_eq_model(max_iterations=30, eta_s=0.1):
     # Initial capacities: main edges have only 1500 (slightly over demand 1200),
     # side edges have 3000 (more than needed).
@@ -78,7 +76,7 @@ def demo_eq_model(max_iterations=30, eta_s=0.1):
     print(f"{'Iteration':<5} {'E':>8} {'M':>6} {'R':>6} {'C':>6} {'S':>6} {'main1':>7} {'main2':>7} {'side1':>7} {'side2':>7}")
     for iteration in range(1, max_iterations + 1):
         M, R, C, S, edge_stresses = mock_kpis(caps)
-        E = performance_index_limited((M, R, C, S))
+        E = performance_index_limited({"M": M, "R": R, "C": C, "S": S})
 
         print(f"{iteration:<5} {E:8.4f} {M:6.4f} {R:6.4f} {C:6.4f} {S:6.4f} "
               f"{caps['main1']:7.1f} {caps['main2']:7.1f} {caps['side1']:7.1f} {caps['side2']:7.1f}")

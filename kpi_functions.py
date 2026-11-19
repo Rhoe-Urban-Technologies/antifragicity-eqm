@@ -5,7 +5,8 @@ Reads SUMO simulation outputs (tripinfo, edgedata) and the network file,
 returns normalised values in [0,1] for:
     M - Mobility throughput (fraction of demand satisfied)
     R - Redundancy (average normalised edge-disjoint paths)
-    C - Network entropy (normalised Shannon entropy of OD flows)
+    C - Network entropy (normalised Shannon entropy of link flows, D3.2 Eq. 17;
+        OD-based variants are also available)
     S - Stress index (average volume/capacity × speed drop)
 """
 import math
@@ -13,10 +14,28 @@ import os
 import random
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from functools import lru_cache
 from typing import Optional
 
 import networkx as nx
 import sumolib
+
+DEFAULT_CAPACITY_PER_LANE = 1800.0  # veh/h
+
+
+@lru_cache(maxsize=2)
+def _read_net_cached(abs_path: str, mtime: float):
+    return sumolib.net.readNet(abs_path)
+
+
+def _read_net(net_file: str):
+    """
+    Read a SUMO network, reusing the parsed object while the file is
+    unchanged (LuST takes several seconds to parse and several KPIs need it).
+    Callers must not modify the returned network.
+    """
+    abs_path = os.path.abspath(net_file)
+    return _read_net_cached(abs_path, os.path.getmtime(abs_path))
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +135,7 @@ def compute_throughput(tripinfo_file: str, summary_file: Optional[str] = None) -
 
 def build_graph(net_file: str) -> nx.DiGraph:
     """Build a directed graph from a SUMO .net.xml file."""
-    net = sumolib.net.readNet(net_file)
+    net = _read_net(net_file)
     G = nx.DiGraph()
     for node in net.getNodes():
         G.add_node(node.getID())
@@ -127,18 +146,30 @@ def build_graph(net_file: str) -> nx.DiGraph:
     return G
 
 
-def _sample_od_pairs(G, num_pairs=500):
-    """Random OD pairs, avoiding loops."""
-    nodes = list(G.nodes())
+DEFAULT_REDUNDANCY_SEED = 42
+
+
+def _sample_od_pairs(G, num_pairs=500, seed: Optional[int] = DEFAULT_REDUNDANCY_SEED):
+    """
+    Random OD pairs, avoiding loops.
+
+    Nodes are sorted before sampling and a dedicated RNG seeded with `seed` is
+    used, so the same network (or two networks with the same node set, e.g.
+    baseline vs. post-disaster) always yields the same OD sample. Pass
+    seed=None for non-deterministic sampling.
+    """
+    nodes = sorted(G.nodes())
     if len(nodes) < 2:
         return []
-    pairs = [(random.choice(nodes), random.choice(nodes)) for _ in range(num_pairs)]
+    rng = random.Random(seed)
+    pairs = [(rng.choice(nodes), rng.choice(nodes)) for _ in range(num_pairs)]
     return [(o, d) for o, d in pairs if o != d]
 
 
 def compute_redundancy(net_file: str,
                        od_pairs: Optional[list] = None,
-                       sample_size: int = 500) -> float:
+                       sample_size: int = 500,
+                       seed: Optional[int] = DEFAULT_REDUNDANCY_SEED) -> float:
     """
     Average number of edge‑disjoint paths per OD pair, normalised by the
     average node out‑degree (as an upper bound).
@@ -160,6 +191,10 @@ def compute_redundancy(net_file: str,
         If None, a random sample is drawn.
     sample_size : int
         Number of random OD pairs to sample (if od_pairs not provided).
+    seed : int or None
+        Seed for OD-pair sampling. A fixed seed keeps R reproducible and makes
+        baseline and post-disaster runs use the same OD sample, so differences
+        in R reflect the network rather than sampling noise. None = random.
 
     Returns
     -------
@@ -168,7 +203,7 @@ def compute_redundancy(net_file: str,
     """
     G = build_graph(net_file)
     if od_pairs is None:
-        od_pairs = _sample_od_pairs(G, sample_size)
+        od_pairs = _sample_od_pairs(G, sample_size, seed)
 
     # Normalisation factor: average out-degree
     avg_deg = sum(d for _, d in G.out_degree()) / G.number_of_nodes()
@@ -325,6 +360,12 @@ def compute_entropy(tripinfo_file: str, route_files: Optional[list[str]] = None)
     """
     Normalised Shannon entropy of the OD flow distribution.
 
+    Note: D3.2 Annex B (Eq. 17) defines C over *link* flows; that is
+    implemented in `compute_link_entropy`, which is the default C used by the
+    examples and the learning loop. This OD-based variant is kept for
+    comparison. With `route_files` it measures planned demand only, so it is
+    identical for every scenario that loads the same routes.
+
     Formula
     -------
     Let p_i = f_i / Σ f_j   (fraction of total flow on OD pair i)
@@ -360,116 +401,278 @@ def compute_entropy(tripinfo_file: str, route_files: Optional[list[str]] = None)
     return entropy / max_entropy
 
 
+def compute_link_entropy(edgedata_file: str, net_file: str,
+                         *, window: Optional[tuple] = None) -> float:
+    """
+    Normalised Shannon entropy of the flow distribution over network links
+    (D3.2 Annex B, Indicator R2, Eq. 17). This is the default C.
+
+    Formula
+    -------
+    p_i = f_i / Σ_j f_j        (share of the total flow on link i)
+
+    C = - Σ_i p_i log(p_i) / log(N)
+
+    where f_i is the number of vehicles that entered link i (edgedata
+    `entered`) and N is the total number of (non-internal) links in the
+    network, including links without flow.
+
+    Unlike the OD-based `compute_entropy`, this reacts to disruptions: when
+    links are closed, flow concentrates on fewer links and C drops.
+
+    Parameters
+    ----------
+    edgedata_file : str
+        SUMO edgedata output.
+    net_file : str
+        Network defining the set of links (N).
+    window : (begin_s, end_s), optional
+        Only use edgedata intervals inside this window (requires an edgedata
+        output with a matching period, e.g. hourly). None = all intervals.
+
+    Returns
+    -------
+    float
+        C in [0,1]. 0 = all flow on one link, 1 = flow spread evenly over all
+        links.
+    """
+    flows, _, _ = aggregate_edgedata(edgedata_file, window=window)
+    link_ids = [edge.getID() for edge in _read_net(net_file).getEdges()
+                if not edge.getID().startswith(":")]
+    n_links = len(link_ids)
+    if n_links <= 1:
+        return 0.0
+    link_flows = [flows.get(eid, 0.0) for eid in link_ids]
+    total = sum(link_flows)
+    if total <= 0:
+        return 0.0
+    entropy = -sum((f / total) * math.log(f / total) for f in link_flows if f > 0)
+    return entropy / math.log(n_links)
+
+
 # ---------------------------------------------------------------------------
 # 4. Stress Index (S)
 # ---------------------------------------------------------------------------
 
-def load_edgedata(edgedata_file: str) -> dict:
+def load_edgedata_intervals(edgedata_file: str) -> list[dict]:
     """
-    Parse edgedata XML, return dict mapping edge id -> total vehicles entered.
-    (Speed data requires lane-level extraction; see _load_edge_speeds.)
+    Parse a SUMO edgedata file into its aggregation intervals.
+
+    Returns
+    -------
+    list of dict
+        One entry per <interval>: {"begin": float, "end": float,
+        "edges": {edge_id: {"entered": float, "speed": float | None,
+        "sampledSeconds": float | None}}}. Internal edges (":...") are skipped.
     """
-    tree = ET.parse(edgedata_file)
-    flows = {}
-    for interval in tree.getroot().findall("interval"):
-        for edge in interval.findall("edge"):
+    intervals = []
+    for _, element in ET.iterparse(edgedata_file, events=("end",)):
+        if element.tag != "interval":
+            continue
+        edges = {}
+        for edge in element.findall("edge"):
             edge_id = edge.get("id")
-            if edge_id and not edge_id.startswith(":"):
-                count = float(edge.get("entered") or edge.get("left") or 0)
-                flows[edge_id] = flows.get(edge_id, 0) + count
-    return flows
+            if not edge_id or edge_id.startswith(":"):
+                continue
+            speed = edge.get("speed")
+            sampled = edge.get("sampledSeconds")
+            edges[edge_id] = {
+                "entered": float(edge.get("entered") or edge.get("left") or 0),
+                "speed": float(speed) if speed is not None else None,
+                "sampledSeconds": float(sampled) if sampled is not None else None,
+            }
+        intervals.append({"begin": float(element.get("begin")),
+                          "end": float(element.get("end")),
+                          "edges": edges})
+        element.clear()
+    return intervals
+
+
+def aggregate_edgedata(edgedata_file: str,
+                       window: Optional[tuple] = None) -> tuple[dict, dict, float]:
+    """
+    Aggregate edgedata over all intervals, or over the intervals inside
+    `window`.
+
+    Flows are summed. Speeds are averaged weighted by `sampledSeconds`
+    (vehicle-seconds on the edge), which is how SUMO itself aggregates speed;
+    edges without `sampledSeconds` fall back to an unweighted mean.
+
+    Parameters
+    ----------
+    edgedata_file : str
+        SUMO edgedata output.
+    window : (begin_s, end_s), optional
+        Only intervals fully inside the window are used, and together they
+        must cover it exactly. Use an edgedata output whose period divides the
+        window (e.g. hourly edgedata for a 17:00–18:00 window).
+
+    Returns
+    -------
+    (flows, speeds, duration_hours)
+        flows : {edge_id: vehicles entered during the selected intervals}
+        speeds : {edge_id: mean speed in m/s} (only edges with speed data)
+        duration_hours : total length of the selected intervals in hours
+    """
+    intervals = load_edgedata_intervals(edgedata_file)
+    if window is not None:
+        w_begin, w_end = window
+        selected = [iv for iv in intervals
+                    if iv["begin"] >= w_begin - 1e-6 and iv["end"] <= w_end + 1e-6]
+        covered = sum(iv["end"] - iv["begin"] for iv in selected)
+        if not selected or abs(covered - (w_end - w_begin)) > 1e-6:
+            available = [(iv["begin"], iv["end"]) for iv in intervals[:5]]
+            raise ValueError(
+                f"Edgedata intervals in {edgedata_file} do not cover the window "
+                f"{window} (first intervals: {available}). Use an edgedata "
+                f"output aggregated hourly (period=3600)."
+            )
+    else:
+        selected = intervals
+
+    flows = defaultdict(float)
+    speed_weighted_sum = defaultdict(float)
+    speed_weight = defaultdict(float)
+    for interval in selected:
+        for edge_id, data in interval["edges"].items():
+            flows[edge_id] += data["entered"]
+            if data["speed"] is None:
+                continue
+            weight = data["sampledSeconds"] if data["sampledSeconds"] is not None else 1.0
+            if weight <= 0:
+                continue
+            speed_weighted_sum[edge_id] += data["speed"] * weight
+            speed_weight[edge_id] += weight
+
+    speeds = {eid: speed_weighted_sum[eid] / speed_weight[eid] for eid in speed_weight}
+    duration_hours = sum(iv["end"] - iv["begin"] for iv in selected) / 3600.0
+    return dict(flows), speeds, duration_hours
+
+
+def load_edgedata(edgedata_file: str) -> dict:
+    """Edge id -> total vehicles entered, summed over all intervals."""
+    return aggregate_edgedata(edgedata_file)[0]
 
 
 def _load_edge_speeds(edgedata_file: str) -> dict:
-    """
-    Extract average speed per edge from edgedata (if available).
-    Falls back to traveltime attribute if speed not present.
-    """
-    tree = ET.parse(edgedata_file)
-    speeds = {}
-    for interval in tree.getroot().findall("interval"):
-        for edge in interval.findall("edge"):
-            edge_id = edge.get("id")
-            if edge_id and not edge_id.startswith(":"):
-                # Some edgedata outputs include speed attribute
-                sp = edge.get("speed")
-                if sp is not None:
-                    speeds[edge_id] = float(sp)
-    return speeds
+    """Edge id -> mean speed (m/s) over all intervals, weighted by sampledSeconds."""
+    return aggregate_edgedata(edgedata_file)[1]
 
 
-def compute_stress(net_file: str,
-                   edgedata_file: str,
-                   capacity_per_lane: float = 1800.0,
-                   sim_duration_hours: float = 25.0) -> float:
+def compute_edge_stresses(net_file: str,
+                          edgedata_file: str,
+                          *,
+                          capacity_per_lane: float = DEFAULT_CAPACITY_PER_LANE,
+                          sim_duration_hours: Optional[float] = None,
+                          window: Optional[tuple] = None,
+                          capacities: Optional[dict] = None) -> dict:
     """
-    Average over all edges of:
-        min( (flow / capacity) * (1 - actual_speed / free_flow_speed), 1.0 )
+    Per-edge stress for every non-internal edge of `net_file`.
 
     Formula (per edge a)
     --------------------
     stress_a = min( (f_a / C_a) * (1 - v_a / v0_a), 1.0 )
 
     where
-        f_a   = flow on edge a (veh over the period),
-        C_a   = capacity of edge a (lanes * capacity_per_lane),
-        v_a   = actual speed on edge a (m/s),
-        v0_a  = free‑flow speed of edge a (m/s).
-
-    S = (1 / |A|) * Σ_a stress_a        (average over all non‑internal edges)
+        f_a   = flow on edge a (veh/h, vehicles entered ÷ period length),
+        C_a   = capacity of edge a (veh/h): `capacities[a]` if given, else
+                lanes × capacity_per_lane,
+        v_a   = mean speed on edge a over the period (m/s),
+        v0_a  = free-flow speed of edge a (m/s), from `net_file`.
 
     Parameters
     ----------
     net_file : str
-        Path to .net.xml.
+        Network supplying lane counts and free-flow speeds. When the simulated
+        network has modified speeds (the learning loop), pass the *original*
+        network here so that v0 is the real free-flow speed and raising
+        capacity does not raise measured stress.
     edgedata_file : str
-        Path to edgedata.xml (must contain flow and speed data).
+        SUMO edgedata output with `entered` and `speed`.
     capacity_per_lane : float
-        Approximate capacity per lane (veh/h).
+        Nominal capacity per lane (veh/h), used when `capacities` has no entry.
+    sim_duration_hours : float, optional
+        Overrides the period length used to turn counts into hourly flows.
+        By default it is taken from the edgedata intervals, so it always
+        matches the simulated horizon. Not allowed together with `window`.
+    window : (begin_s, end_s), optional
+        Measure stress only over this time window (e.g. the closure hour).
+        Requires edgedata aggregated with a period that divides the window.
+    capacities : dict, optional
+        {edge_id: capacity in veh/h}, e.g. the learned capacities.
+
+    Returns
+    -------
+    dict
+        {edge_id: stress in [0,1]}
+    """
+    if window is not None and sim_duration_hours is not None:
+        raise ValueError("Pass either window or sim_duration_hours, not both.")
+
+    net = _read_net(net_file)
+    flows, speeds, duration_hours = aggregate_edgedata(edgedata_file, window=window)
+    hours = sim_duration_hours if sim_duration_hours is not None else duration_hours
+    if hours <= 0:
+        raise ValueError(f"Non-positive period length ({hours} h) for {edgedata_file}")
+
+    edge_stresses = {}
+    for edge in net.getEdges():
+        eid = edge.getID()
+        if eid.startswith(":"):  # internal edges
+            continue
+        lanes = edge.getLanes()
+        if not lanes:
+            continue
+
+        nominal_capacity = len(lanes) * capacity_per_lane
+        capacity = capacities.get(eid, nominal_capacity) if capacities else nominal_capacity
+
+        free_speed = float(lanes[0].getSpeed())
+        if free_speed <= 0:
+            continue
+
+        flow_rate = flows.get(eid, 0.0) / hours
+        # Default to free-flow speed when the edge has no speed data
+        actual_speed = max(speeds.get(eid, free_speed), 1e-3)
+
+        volume_ratio = flow_rate / capacity if capacity > 0 else 0.0
+        speed_drop = max(0.0, 1.0 - actual_speed / free_speed)
+        edge_stresses[eid] = min(1.0, volume_ratio * speed_drop)
+    return edge_stresses
+
+
+def compute_stress(net_file: str,
+                   edgedata_file: str,
+                   *,
+                   capacity_per_lane: float = DEFAULT_CAPACITY_PER_LANE,
+                   sim_duration_hours: Optional[float] = None,
+                   window: Optional[tuple] = None,
+                   capacities: Optional[dict] = None) -> float:
+    """
+    Stress index S: the unweighted average of `compute_edge_stresses` over all
+    non-internal edges.
+
+    S = (1 / |A|) * Σ_a stress_a
+
+    All options after `edgedata_file` are keyword-only (passing the period
+    length positionally used to land in `capacity_per_lane`). See
+    `compute_edge_stresses` for the per-edge formula and the parameters.
 
     Returns
     -------
     float
         S in [0,1].  0 = no stress, 1 = extreme congestion.
     """
-    net = sumolib.net.readNet(net_file)
-    flow_dict = load_edgedata(edgedata_file)
-    speed_dict = _load_edge_speeds(edgedata_file)
-
-    edge_stresses = []
-    for edge in net.getEdges():
-        eid = edge.getID()
-        if eid.startswith(":"):  # internal edges
-            continue
-
-        # Flow (vehicles over the simulation period; assuming hourly rate)
-        flow = flow_dict.get(eid, 0.0)
-        flow_rate = flow / sim_duration_hours
-
-        # Capacity: number of lanes × capacity_per_lane
-        lanes = edge.getLanes()
-        if not lanes:
-            continue
-        capacity = len(lanes) * capacity_per_lane
-
-        # Free-flow speed (m/s) from the network
-        free_speed = float(lanes[0].getSpeed()) if lanes else 0.0
-        if free_speed <= 0:
-            continue
-
-        # Actual speed (m/s) from edgedata
-        actual_speed = speed_dict.get(eid, free_speed)  # default to free-flow if missing
-        # Avoid zero division / negative speed
-        actual_speed = max(actual_speed, 1e-3)
-
-        volume_ratio = flow_rate / capacity if capacity > 0 else 0.0
-        speed_drop = max(0.0, 1.0 - actual_speed / free_speed)
-        edge_stress = min(1.0, volume_ratio * speed_drop)
-        edge_stresses.append(edge_stress)
-
+    edge_stresses = compute_edge_stresses(
+        net_file, edgedata_file,
+        capacity_per_lane=capacity_per_lane,
+        sim_duration_hours=sim_duration_hours,
+        window=window,
+        capacities=capacities,
+    )
     if not edge_stresses:
         return 0.0
-    return sum(edge_stresses) / len(edge_stresses)
+    return sum(edge_stresses.values()) / len(edge_stresses)
 
 
 # ---------------------------------------------------------------------------
@@ -569,3 +772,48 @@ def system_vulnerability(E_base: float, E_post: float) -> float:
         improvement; for reporting these are usually clamped to zero.
     """
     return 1.0 - E_post / E_base if E_base != 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# 8. Impact classification (D3.2, Table 9 / Eq. 20)
+# ---------------------------------------------------------------------------
+
+# (upper bound, class number, label). Class bounds follow D3.2 Table 9;
+# values exactly on a bound belong to the lower class (Eq. 10 uses
+# right-closed intervals, e.g. (0.15, 0.30] = Moderate), except that
+# Table 9 states Negligible as "< 0.05", so 0.05 itself is Minor.
+IMPACT_CLASSES = [
+    (0.15, 2, "Minor"),
+    (0.30, 3, "Moderate"),
+    (0.50, 4, "Major"),
+    (math.inf, 5, "Catastrophic"),
+]
+
+
+def classify_vulnerability(delta: float) -> tuple[int, str]:
+    """
+    Map a vulnerability score (ΔE_s, or a group-level ΔQ_s) to the D3.2
+    impact scale (Table 9, also Eq. 20 interpretation):
+
+        ΔE ≤ 0            → 0  No performance loss
+        0    < ΔE < 0.05  → 1  Negligible
+        0.05 ≤ ΔE ≤ 0.15  → 2  Minor
+        0.15 < ΔE ≤ 0.30  → 3  Moderate
+        0.30 < ΔE ≤ 0.50  → 4  Major
+        ΔE > 0.50         → 5  Catastrophic
+
+    The D3.2 equity escalation rule (r_equity > 1.5 raises the class by one,
+    Eq. 27) is not applied here because r_equity is not computed.
+
+    Returns
+    -------
+    (class_number, label)
+    """
+    if delta <= 0:
+        return 0, "No performance loss"
+    if delta < 0.05:
+        return 1, "Negligible"
+    for upper, cls, label in IMPACT_CLASSES:
+        if delta <= upper:
+            return cls, label
+    return 5, "Catastrophic"  # unreachable (inf bound); keeps type checkers happy
