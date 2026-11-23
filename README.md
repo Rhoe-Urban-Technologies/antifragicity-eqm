@@ -14,6 +14,7 @@ assessment described in deliverable **D3.2**.
 | `bratislava_flood_example.py` | D3.2 worked example (§2) |
 | `demo_eq_model.py` | Learning loop on a synthetic 4‑edge network |
 | `parallel_simulations.py` | Runs several SUMO simulations at once (work in progress) |
+| `eqm_api/` | FastAPI back end: KPIs, vulnerability, simulations and EQ runs as local jobs (§5) |
 | `tests/` | `pytest` suite (no SUMO needed) |
 | `AntifragiCity-WP4/` | Submodule with the LuST scenario and WP4 scripts |
 
@@ -417,9 +418,11 @@ PyCharm's run console, and `SUMO_PROGRESS=1` / `0` forces it on or off.
 
 ```bash
 python luxembourg_example.py
+python luxembourg_example.py --stress-window none --output result.json   # whole-day S, result as JSON
 ```
 
-All paths and the KPI windows are defined in `scenario_config.py`.
+All paths and the KPI windows are defined in `scenario_config.py`. Windows are
+`BEGIN,END` in seconds (whole hours, since they read hourly edgedata) or `none`.
 
 #### 3.3.5 Run the tests
 
@@ -533,6 +536,18 @@ E_final, final_caps, history = eq_model(
 )
 ```
 
+From the command line, `--settings settings.json` overrides entries of
+`EQ_SETTINGS` (windows as `[begin, end]` or `null`) and `--output DIR` chooses
+the run folder:
+
+```bash
+python luxembourg_example_eq_model.py --settings settings.json --output runs/short
+```
+
+`eq_model(..., on_day=callback)` calls `callback` with each history entry as
+soon as it is known; the script uses it to rewrite `run.json` after every day,
+with the wall-clock time of each day in `day_seconds`.
+
 `history` is a list of dicts, one per day (`day`, `E`, `M`, `R`, `C`, `S`, SRI
 components, and mean/min/max capacity factor relative to base). The last entry
 (`day == "final"`) describes the final simulation.
@@ -595,3 +610,56 @@ implementation in `eq_model.py`.
 
 This means the current model is a **reduced, heuristic implementation** inspired
 by Algorithm 1, not a line-by-line complete translation.
+
+## 5. API (`eqm_api/`)
+
+A FastAPI back end over the functionality above, following the convention of
+the ac-t4.5 `atc_api` (and `@rhoe/data`): routes under `/api`, lists as
+`{items, total}` with `page`/`page_size`, ids as `_id` strings, and 422/409
+errors as `{"code", "message"}` where a UI should explain them.
+
+```bash
+python -m pip install -r requirements.txt -r requirements-api.txt
+uvicorn eqm_api.main:app --port 8000   # from the repository root, with SUMO available
+# interactive docs: http://localhost:8000/docs
+python -m pytest tests                 # includes the API tests (no SUMO needed)
+```
+
+| Method and path | What it does |
+|---|---|
+| `GET /api/health` | Liveness |
+| `GET /api/scenario` | LuST network, horizon, closure window and closed edges, KPI windows, and whether the baseline/disaster outputs exist |
+| `GET /api/impact-classes` | D3.2 Table 9 classes with their bounds |
+| `POST /api/vulnerability` | $E$ for baseline and post-disaster KPIs, $\Delta E$ and the impact class. Full Tier‑2 index if both states give `Q` and `I`, else the limited index |
+| `POST /api/simulations` | Queue the `baseline` (`get_benchmark.py`) or `disaster` (`sumo -c disaster.sumocfg`) run. **Replaces** that scenario's current outputs |
+| `POST /api/assessments` | Queue the static assessment (`luxembourg_example.py`) with optional `stress_window` / `entropy_window` |
+| `POST /api/eqm-runs` | Queue an EQ learning run (`luxembourg_example_eq_model.py`) with `name` and `settings` (defaults: `EQ_SETTINGS`) |
+| `GET /api/{simulations,assessments,eqm-runs}` | List jobs (filter by `status`; simulations also by `scenario`) |
+| `GET /api/{…}/{id}` | One job with its progress; assessments add `result`, EQ runs add `static`, `history`, `day_seconds`, `final`, `provenance` |
+| `GET /api/eqm-runs/{id}/capacities` | Learned capacity per edge with `base` and `factor`, largest change first (`changed_only`, `min_change`, paging) |
+| `GET /api/{…}/{id}/log` | Last lines of the job's output |
+| `POST /api/{…}/{id}/cancel` | Cancel a queued or running job (409 if it already ended) |
+
+Jobs run the existing scripts as local background processes in their own
+process group (POSIX), so they survive an API reload and a restarted API
+adopts them by PID. Everything is kept under `outputs/jobs/<id>/` (ignored by
+git): `job.json`, `job.log`, for EQ runs `settings.json`, and `run/` with the
+script's output (`result.json`, or `run.json` and `capacities.json`).
+
+Progress comes from the outputs: SUMO's `Step #` log for simulations (fraction
+of the 25 h and an ETA), and `run.json`, which the EQ script rewrites every day,
+for EQ runs (stage, simulations done, the current day's fraction, ETA from the
+mean day time).
+
+All three kinds share one queue and run **one at a time** by default: they read
+and write the same files in the scenario folder (the baseline/disaster outputs,
+`outputs/iter.*`), so queue order matters, e.g. both simulations, then an
+assessment or EQ run. A simulation counts as completed only if it rewrote all of
+its output files, because `get_benchmark.py` does not pass on SUMO's exit code.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EQM_JOBS_DIR` | `outputs/jobs` | Where jobs are kept |
+| `EQM_PYTHON` | the API's interpreter | Interpreter that runs the scripts |
+| `EQM_MAX_RUNNING_JOBS` | `1` | Jobs running at once (keep 1, see above; tests use 0) |
+| `EQM_CORS_ORIGINS` | `http://localhost:5180` | Browser origins allowed to call the API directly |
