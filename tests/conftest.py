@@ -5,6 +5,9 @@ import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
+# API jobs go to a throwaway folder and never start a process during tests.
+os.environ.setdefault("EQM_JOBS_DIR", os.path.join(REPO_ROOT, "outputs", "test_jobs"))
+os.environ.setdefault("EQM_MAX_RUNNING_JOBS", "0")
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 

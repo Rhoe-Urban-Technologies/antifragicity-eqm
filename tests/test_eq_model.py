@@ -42,11 +42,13 @@ def test_eq_model_loop(tmp_path, small_net, monkeypatch):
     monkeypatch.setattr(eq, "run_sumo_simulation", _fake_sumo)
     window = (3600, 7200)
 
+    seen = []
     E_final, caps, history = eq.eq_model(small_net, str(tmp_path), max_iterations=3,
                                          verbose=False, begin_time=0, end_time=7200,
-                                         stress_window=window)
+                                         stress_window=window, on_day=seen.append)
 
     assert [h["day"] for h in history] == [1, 2, 3, "final"]
+    assert seen == history  # each entry reported as soon as it is known
     assert history[-1]["E"] == pytest.approx(E_final)
 
     # Day 1 uses base capacities, so S must equal the static computation.
