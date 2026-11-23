@@ -154,7 +154,7 @@ def eq_model(disaster_network_file, scenario_directory,
              capacity_min_factor=0.5, capacity_max_factor=2.0, max_speed_factor=1.3,
              convergence_tol=1e-4, verbose=True, begin_time=0, end_time=90000,
              base_cfg="disaster.sumocfg", stress_window=None, entropy_window=None,
-             capacity_per_lane=DEFAULT_CAPACITY_PER_LANE):
+             capacity_per_lane=DEFAULT_CAPACITY_PER_LANE, on_day=None):
     """
     Run the iterative equilibrium learning loop.
 
@@ -182,6 +182,9 @@ def eq_model(disaster_network_file, scenario_directory,
         loop writes itself.
     capacity_per_lane : float
         Nominal capacity per lane (veh/h).
+    on_day : callable, optional
+        Called with each history entry as soon as it is known (every day, then
+        the final run), e.g. to save progress during a long run.
 
     Returns
     -------
@@ -269,6 +272,8 @@ def eq_model(disaster_network_file, scenario_directory,
             "infrastructure_pressure": infrastructure_pressure,
             **_capacity_factor_stats(current_capacities, base_capacities),
         })
+        if on_day is not None:
+            on_day(history[-1])
 
         # ---------- Short-term gradient ----------
         # S is the mean of these per-edge stresses (same capacities, same
@@ -305,6 +310,8 @@ def eq_model(disaster_network_file, scenario_directory,
     final_performance = performance_index_limited(final_kpis)
     history.append({"day": "final", "E": final_performance, **final_kpis,
                     **_capacity_factor_stats(current_capacities, base_capacities)})
+    if on_day is not None:
+        on_day(history[-1])
 
     if verbose:
         print(f"Final E = {final_performance:.4f}")

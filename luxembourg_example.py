@@ -1,4 +1,11 @@
-"""Static vulnerability assessment for the LuST scenario (baseline vs. post-disaster)."""
+"""
+Static vulnerability assessment for the LuST scenario (baseline vs. post-disaster).
+
+    python luxembourg_example.py [--stress-window 61200,64800 | none]
+                                 [--entropy-window BEGIN,END | none] [--output result.json]
+"""
+import argparse
+import json
 import os
 import sys
 
@@ -86,5 +93,35 @@ def _fmt(kpis):
     return ", ".join(f"{k}={v:.4f}" for k, v in kpis.items())
 
 
+def parse_window(text):
+    """'BEGIN,END' in seconds -> (BEGIN, END); 'none' -> None (whole horizon)."""
+    if text.strip().lower() in ("none", ""):
+        return None
+    try:
+        begin, end = (int(float(x)) for x in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected BEGIN,END in seconds or 'none', got {text!r}")
+    if end <= begin:
+        raise argparse.ArgumentTypeError(f"window end must be after its begin, got {text!r}")
+    return begin, end
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    parser.add_argument("--stress-window", type=parse_window, default=cfg.STRESS_WINDOW,
+                        help="window for S as BEGIN,END seconds, or 'none' (default: the closure hour)")
+    parser.add_argument("--entropy-window", type=parse_window, default=cfg.ENTROPY_WINDOW,
+                        help="window for C as BEGIN,END seconds, or 'none' (default: none)")
+    parser.add_argument("--output", help="also write the result to this JSON file")
+    args = parser.parse_args(argv)
+
+    result = static_assessment(stress_window=args.stress_window, entropy_window=args.entropy_window)
+    if args.output:
+        record = {**result, "stress_window": args.stress_window, "entropy_window": args.entropy_window}
+        with open(args.output, "w") as f:
+            json.dump(record, f, indent=2)
+    return result
+
+
 if __name__ == "__main__":
-    static_assessment()
+    main()
