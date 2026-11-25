@@ -609,7 +609,7 @@ implementation in `eq_model.py`.
 | Full stopping logic with all norms and consistency | Missing | Current stopping rule uses performance stabilization only; full criteria depend on explicit `f_k`, `m_k`, capacity norm tracking, and a defined cross-layer consistency metric.                                              |
 
 This means the current model is a **reduced, heuristic implementation** inspired
-by Algorithm 1, not a line-by-line complete translation.
+by Algorithm 1, **not** a line-by-line complete translation.
 
 ## 5. API (`eqm_api/`)
 
